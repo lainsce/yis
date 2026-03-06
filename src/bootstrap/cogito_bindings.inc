@@ -3171,6 +3171,15 @@ static void __cogito_set_script_dir(YisVal dirv) {
   if (tmp) yis_release_val(YV_STR(tmp));
 }
 
+static void __cogito_set_direction(YisVal dirv) {
+  int dir = (int)yis_as_int(dirv);
+  cogito_set_direction(dir);
+}
+
+static YisVal __cogito_get_direction(void) {
+  return YV_INT(cogito_get_direction());
+}
+
 static YisVal __cogito_open_url(YisVal urlv) {
   YisStr* tmp = NULL;
   const char* url = cogito_optional_cstr(urlv, &tmp);
@@ -3521,6 +3530,8 @@ void __cogito_button_on_click(YisVal btn, YisVal handler);
 #define cogito_timer_cancel_all __cogito_timer_cancel_all
 #define cogito_load_sum __cogito_load_sum
 #define cogito_set_script_dir __cogito_set_script_dir
+#define cogito_set_direction __cogito_set_direction
+#define cogito_get_direction __cogito_get_direction
 #define cogito_active_indicator_new __cogito_active_indicator
 #define cogito_switchbar_new __cogito_switchbar
 #define cogito_switchbar_get_checked __cogito_switchbar_get_checked
