@@ -2574,6 +2574,15 @@ static void tc_stmt_inner(Stmt *s, Ctx *ctx, Locals *loc, GlobalEnv *env, Ty *re
 static void tc_pat(Pat *pat, Ty *scrut_ty, Ctx *ctx, Locals *loc, GlobalEnv *env, Diag *err);
 static Ty *tc_call(Expr *call_expr, Ctx *ctx, Locals *loc, GlobalEnv *env, Diag *err);
 
+static void set_arg_diag(Diag *err, Ctx *ctx, Expr *arg) {
+    if (!err || !ctx || !arg || err->line != 0) {
+        return;
+    }
+    err->path = ctx->cask_path.data;
+    err->line = arg->line;
+    err->col = arg->col;
+}
+
 static Ty *numeric_result(Arena *arena, Ty *a, Ty *b, Str path, int line, int col, const char *op, Diag *err) {
     if (!ty_is_numeric(a) || !ty_is_numeric(b)) {
         set_errf(err, path, line, col, "operator %s expects numeric types", op);
@@ -2679,6 +2688,7 @@ static Ty *tc_call(Expr *call_expr, Ctx *ctx, Locals *loc, GlobalEnv *env, Diag 
             for (size_t i = 0; i < argc; i++) {
                 Ty *at = tc_expr_inner(args[i], ctx, loc, env, err);
                 if (!ensure_assignable(env->arena, sig->params[i], at, ctx->cask_path, "arg", err)) {
+                    set_arg_diag(err, ctx, args[i]);
                     subst_free(&subst);
                     return NULL;
                 }
@@ -2804,6 +2814,7 @@ method_call:
             for (size_t i = 0; i < argc; i++) {
                 Ty *at = tc_expr_inner(args[i], ctx, loc, env, err);
                 if (!ensure_assignable(env->arena, sig->params[i], at, ctx->cask_path, "arg", err)) {
+                    set_arg_diag(err, ctx, args[i]);
                     subst_free(&subst);
                     return NULL;
                 }
@@ -2927,6 +2938,7 @@ method_call:
         for (size_t i = 0; i < argc; i++) {
             Ty *at = tc_expr_inner(args[i], ctx, loc, env, err);
             if (!ensure_assignable(env->arena, sig->params[i], at, ctx->cask_path, "arg", err)) {
+                set_arg_diag(err, ctx, args[i]);
                 subst_free(&subst);
                 return NULL;
             }

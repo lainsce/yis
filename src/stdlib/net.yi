@@ -197,11 +197,11 @@ pub fun request(method = string, url = string, body = any, headers = any, params
   cmd = stdr.str_concat(cmd, " 2>&1")
 
   let run = stdr.run_command(cmd)
-  let curl_exit = run[0] ?? 1
+  let curl_exit = stdr.num(run[0] ?? 1)
   let raw = run[1] ?? ""
   let parsed = _parse_status_payload(raw)
-  let status = parsed["status"] ?? 0
-  let text = parsed["body"] ?? ""
+  let status = stdr.num(parsed["status"] ?? 0)
+  let text = stdr.str(parsed["body"] ?? "")
 
   let ?resp = []: [string => any]
   resp["method"] = method

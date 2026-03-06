@@ -123,6 +123,180 @@ pub fun run_command(cmd = string) (( num, string )) {
   return __run_command(cmd)
 }
 
+-- Check if a file exists (native stat-based, no subprocess)
+fun __file_exists(path = string) (( bool )) { }
+
+pub fun file_exists(path = string) (( bool )) {
+  return __file_exists(path)
+}
+
+-- Get file modification time as unix timestamp (-1 if not found)
+fun __file_mtime(path = string) (( num )) { }
+
+pub fun file_mtime(path = string) (( num )) {
+  return __file_mtime(path)
+}
+
+-- Get current working directory (native, no subprocess)
+fun __getcwd() (( string )) { }
+
+pub fun getcwd() (( string )) {
+  return __getcwd()
+}
+
+fun is_ws(ch = string) (( bool )) {
+  let c = char_code(ch)
+  return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+pub fun trim(text = string) (( string )) {
+  let n = len(text)
+  let ?start = 0
+  for (; start < n; start = start + 1) {
+    if !is_ws(slice(text, start, start + 1)) {
+      break
+    }
+  }
+
+  let ?end = n
+  for (; end > start; end = end - 1) {
+    if !is_ws(slice(text, end - 1, end)) {
+      break
+    }
+  }
+
+  return slice(text, start, end)
+}
+
+pub fun starts_with(text = string, prefix = string) (( bool )) {
+  let tn = len(text)
+  let pn = len(prefix)
+  if pn == 0 {
+    return true
+  }
+  if pn > tn {
+    return false
+  }
+  return slice(text, 0, pn) == prefix
+}
+
+pub fun ends_with(text = string, suffix = string) (( bool )) {
+  let tn = len(text)
+  let sn = len(suffix)
+  if sn == 0 {
+    return true
+  }
+  if sn > tn {
+    return false
+  }
+  return slice(text, tn - sn, tn) == suffix
+}
+
+pub fun index_of(text = string, needle = string) (( num )) {
+  let tn = len(text)
+  let nn = len(needle)
+  if nn == 0 {
+    return 0
+  }
+  if nn > tn {
+    return -1
+  }
+
+  let ?i = 0
+  let end = tn - nn
+  for (; i <= end; i = i + 1) {
+    if slice(text, i, i + nn) == needle {
+      return i
+    }
+  }
+  return -1
+}
+
+pub fun contains(text = string, needle = string) (( bool )) {
+  return index_of(text, needle) >= 0
+}
+
+pub fun last_index_of(text = string, needle = string) (( num )) {
+  let tn = len(text)
+  let nn = len(needle)
+  if nn == 0 || nn > tn {
+    return -1
+  }
+
+  let ?pos = -1
+  let ?i = 0
+  let end = tn - nn
+  for (; i <= end; i = i + 1) {
+    if slice(text, i, i + nn) == needle {
+      pos = i
+    }
+  }
+  return pos
+}
+
+pub fun shell_quote(text = string) (( string )) {
+  let ?out = "'"
+  let ?i = 0
+  let n = len(text)
+  for (; i < n; i = i + 1) {
+    let ch = slice(text, i, i + 1)
+    if ch == "'" {
+      out = str_concat(out, "'\"'\"'")
+    } else {
+      out = str_concat(out, ch)
+    }
+  }
+  out = str_concat(out, "'")
+  return out
+}
+
+pub fun basename(path = string) (( string )) {
+  let p = trim(path)
+  let idx = last_index_of(p, "/")
+  if idx < 0 {
+    return p
+  }
+  return slice(p, idx + 1, len(p))
+}
+
+pub fun dirname(path = string) (( string )) {
+  let p = trim(path)
+  let idx = last_index_of(p, "/")
+  if idx <= 0 {
+    return ""
+  }
+  return slice(p, 0, idx)
+}
+
+pub fun stem(file_name = string) (( string )) {
+  let idx = last_index_of(file_name, ".")
+  if idx <= 0 {
+    return file_name
+  }
+  return slice(file_name, 0, idx)
+}
+
+pub fun join_path(dir = string, name = string) (( string )) {
+  let base = trim(dir)
+  let ?leaf = trim(name)
+
+  if len(base) == 0 {
+    return leaf
+  }
+  if len(leaf) == 0 {
+    return base
+  }
+
+  let ?out = base
+  if !ends_with(out, "/") {
+    out = str_concat(out, "/")
+  }
+  if starts_with(leaf, "/") {
+    leaf = slice(leaf, 1, len(leaf))
+  }
+  return str_concat(out, leaf)
+}
+
 -- Command-line arguments (argv as array of strings)
 fun __args() (( [string] )) { }
 pub fun args() (( [string] )) {

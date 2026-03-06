@@ -19,6 +19,7 @@
 #include "arena.h"
 #include "codegen.h"
 #include "diag.h"
+#include "external_module.h"
 #include "file.h"
 #include "platform.h"
 #include "project.h"
@@ -73,16 +74,6 @@ static char *cache_base_dir(void) {
         return NULL;
     }
     return path_join(buf, ".yi-cache");
-}
-
-static int run_binary(const char *path) {
-    if (!path) return 1;
-    char cmd[4096];
-    int n = snprintf(cmd, sizeof(cmd), "\"%s\"", path);
-    if (n < 0 || (size_t)n >= sizeof(cmd)) {
-        return 1;
-    }
-    return system(cmd);
 }
 
 /* Run binary with optional arguments (e.g. for self-hosted compiler). */
@@ -172,11 +163,6 @@ static bool prepare_macos_app_bundle(const char *exe_path, const char *bundle_id
 }
 #endif
 
-static bool expr_string_literal_as_filename(Expr *e, char *out, size_t out_cap);
-
-// Cogito build integration (yis-local copy)
-#include "cogito_build.inc"
-
 static bool sanitize_filename_component(const char *src, size_t src_len, char *out, size_t out_cap) {
     if (!src || !out || out_cap == 0) return false;
     size_t n = 0;
@@ -192,41 +178,6 @@ static bool sanitize_filename_component(const char *src, size_t src_len, char *o
         }
         if (n + 1 < out_cap) {
             out[n++] = mapped;
-        }
-    }
-    while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ' ')) {
-        n--;
-    }
-    if (n == 0) {
-        out[0] = '\0';
-        return false;
-    }
-    out[n] = '\0';
-    return true;
-}
-
-static bool expr_string_literal_as_filename(Expr *e, char *out, size_t out_cap) {
-    if (!e || e->kind != EXPR_STR || !out || out_cap == 0) return false;
-    StrParts *parts = e->as.str_lit.parts;
-    if (!parts || parts->len == 0) return false;
-
-    size_t n = 0;
-    for (size_t i = 0; i < parts->len; i++) {
-        StrPart *part = &parts->parts[i];
-        if (part->kind != STR_PART_TEXT) return false;
-        for (size_t j = 0; j < part->as.text.len; j++) {
-            unsigned char c = (unsigned char)part->as.text.data[j];
-            char mapped;
-            if (isalnum(c) || c == '.' || c == '_' || c == '-') {
-                mapped = (char)c;
-            } else if (c == ' ' || c == '\t') {
-                mapped = '-';
-            } else {
-                mapped = '_';
-            }
-            if (n + 1 < out_cap) {
-                out[n++] = mapped;
-            }
         }
     }
     while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ' ')) {
@@ -272,16 +223,11 @@ static void print_usage(FILE *out) {
     fprintf(out, "  YIS_CC_FLAGS    Additional C compiler flags\n");
     fprintf(out, "  NO_COLOR         Set to disable colored output\n");
     fprintf(out, "\n");
-    fprintf(out, "Cogito GUI Framework:\n");
-    fprintf(out, "  To build GUI applications with Cogito:\n");
-    fprintf(out, "    1. Install or build Cogito (libcogito + cogito.yi)\n");
-    fprintf(out, "    2. Add 'bring cogito;' to your init.yi\n");
-    fprintf(out, "    3. Ensure raylib is installed (brew install raylib on macOS)\n");
-    fprintf(out, "\n");
-    fprintf(out, "  Cogito Environment Variables:\n");
-    fprintf(out, "    YIS_COGITO_CFLAGS   Additional C flags for Cogito compilation\n");
-    fprintf(out, "    YIS_COGITO_FLAGS    Additional linker flags for Cogito\n");
-    fprintf(out, "    YIS_COGITO_STDLIB   Directory or file path for cogito.yi module resolution\n");
+    fprintf(out, "External Module Environment Variables (replace <NAME> with module name, e.g. COGITO):\n");
+    fprintf(out, "    YIS_<NAME>_PATH     Directory or file path for module .yi resolution\n");
+    fprintf(out, "    YIS_<NAME>_BINDINGS Path to module bindings .inc file\n");
+    fprintf(out, "    YIS_<NAME>_CFLAGS   Additional C flags for module compilation\n");
+    fprintf(out, "    YIS_<NAME>_FLAGS    Additional linker flags for module\n");
     fprintf(out, "    YIS_RAYLIB_CFLAGS   C flags for raylib (auto-detected on macOS/Linux)\n");
     fprintf(out, "    YIS_RAYLIB_FLAGS    Linker flags for raylib (auto-detected on macOS/Linux)\n");
 }
@@ -316,6 +262,23 @@ static const char *join_flags(char *buf, size_t cap, const char *a, const char *
     }
     snprintf(buf, cap, "%s %s", a, b);
     return buf;
+}
+
+// Get an env var for an external module: YIS_{NAME}_{suffix}
+static const char *get_module_env_val(const char *name, const char *suffix) {
+    static char env_buf[256];
+    size_t nlen = strlen(name);
+    if (nlen + strlen(suffix) + 5 >= sizeof(env_buf)) return NULL;
+    memcpy(env_buf, "YIS_", 4);
+    for (size_t i = 0; i < nlen; i++) {
+        env_buf[4 + i] = (char)toupper((unsigned char)name[i]);
+    }
+    env_buf[4 + nlen] = '_';
+    size_t slen = strlen(suffix);
+    memcpy(env_buf + 5 + nlen, suffix, slen);
+    env_buf[5 + nlen + slen] = '\0';
+    const char *val = getenv(env_buf);
+    return (val && val[0]) ? val : NULL;
 }
 
 #if defined(__APPLE__) || defined(__linux__)
@@ -501,35 +464,54 @@ int main(int argc, char **argv) {
     }
 
 
-        bool uses_cogito = program_uses_cogito(prog);
+        // Detect external modules (e.g. cogito) and resolve their build artifacts.
+        const char *ext_module_name = NULL;
+        const char *ext_bindings_path_str = NULL;
+        char *ext_bindings_alloc = NULL;
+        {
+            // Check known external modules. Currently we support one external
+            // module per program; this loop picks the first match.
+            const char *known_ext_modules[] = { "cogito", NULL };
+            for (size_t i = 0; known_ext_modules[i]; i++) {
+                if (program_uses_module(prog, known_ext_modules[i])) {
+                    ext_module_name = known_ext_modules[i];
+                    break;
+                }
+            }
+            if (ext_module_name) {
+                ext_bindings_alloc = find_module_bindings(ext_module_name, NULL);
+                ext_bindings_path_str = ext_bindings_alloc;
+            }
+        }
+        bool uses_ext_module = (ext_module_name != NULL);
+
         const char *extra_cflags = "";
         const char *extra_ldflags = "";
         char extra_cflags_buf[2048] = {0};
         char extra_ldflags_buf[2048] = {0};
-        const char *cogito_cflags_env = getenv("YIS_COGITO_CFLAGS");
-        const char *cogito_cflags = (cogito_cflags_env && cogito_cflags_env[0]) ? cogito_cflags_env : cogito_default_cflags();
-        if (cogito_cflags && cogito_cflags[0]) {
-            extra_cflags = cogito_cflags;
-        }
-        if (uses_cogito) {
+        if (uses_ext_module) {
+            // Module-specific cflags: YIS_<NAME>_CFLAGS or auto-detected
+            const char *mod_cflags = get_module_env_val(ext_module_name, "CFLAGS");
+            if (!mod_cflags) mod_cflags = module_default_cflags(ext_module_name);
+
             const char *ray_cflags = getenv("YIS_RAYLIB_CFLAGS");
             if (!(ray_cflags && ray_cflags[0])) {
 #if defined(__APPLE__) || defined(__linux__)
                 ray_cflags = raylib_default_cflags();
 #endif
             }
-            extra_cflags = join_flags(extra_cflags_buf, sizeof(extra_cflags_buf), ray_cflags, cogito_cflags);
+            extra_cflags = join_flags(extra_cflags_buf, sizeof(extra_cflags_buf), ray_cflags, mod_cflags);
 
+            // Module-specific ldflags: YIS_<NAME>_FLAGS or auto-detected
             const char *ray_flags = getenv("YIS_RAYLIB_FLAGS");
-            const char *cogito_flags = getenv("YIS_COGITO_FLAGS");
+            const char *mod_flags = get_module_env_val(ext_module_name, "FLAGS");
             if (!(ray_flags && ray_flags[0])) {
                 ray_flags = raylib_default_ldflags();
             }
-            if (!(cogito_flags && cogito_flags[0])) {
-                cogito_flags = cogito_default_ldflags();
+            if (!mod_flags) {
+                mod_flags = module_default_ldflags(ext_module_name);
             }
-            // Keep Cogito search paths first so local cogito/build wins over system-installed libcogito.
-            extra_ldflags = join_flags(extra_ldflags_buf, sizeof(extra_ldflags_buf), cogito_flags, ray_flags);
+            extra_ldflags = join_flags(extra_ldflags_buf, sizeof(extra_ldflags_buf), mod_flags, ray_flags);
         }
 
         // Generate unique binary name from app id (if statically set) or entry file basename.
@@ -539,6 +521,13 @@ int main(int argc, char **argv) {
             entry_basename = strrchr(entry, '\\');
         }
         entry_basename = entry_basename ? entry_basename + 1 : entry;
+        size_t entry_len = strlen(entry);
+        bool is_self_host_entry =
+            strcmp(entry, "src/init.yi") == 0 ||
+            (entry_len >= strlen("/src/init.yi") &&
+             strcmp(entry + (entry_len - strlen("/src/init.yi")), "/src/init.yi") == 0) ||
+            (entry_len >= strlen("\\src\\init.yi") &&
+             strcmp(entry + (entry_len - strlen("\\src\\init.yi")), "\\src\\init.yi") == 0);
 
         // Remove .yi extension if present
         char name_source[256];
@@ -551,9 +540,9 @@ int main(int argc, char **argv) {
         if (!sanitize_filename_component(name_source, strlen(name_source), name_without_ext, sizeof(name_without_ext))) {
             snprintf(name_without_ext, sizeof(name_without_ext), "main");
         }
-        if (uses_cogito) {
+        if (uses_ext_module) {
             char appid_name[256];
-            if (program_find_cogito_appid_name(prog, appid_name, sizeof(appid_name))) {
+            if (program_find_appid_name(prog, appid_name, sizeof(appid_name))) {
                 snprintf(name_without_ext, sizeof(name_without_ext), "%s", appid_name);
             }
         }
@@ -564,8 +553,16 @@ int main(int argc, char **argv) {
         snprintf(unique_bin_name, sizeof(unique_bin_name), "%s", name_without_ext);
 #endif
 
+    if (is_self_host_entry) {
+#if defined(_WIN32)
+        snprintf(unique_bin_name, sizeof(unique_bin_name), ".yi_run_out.exe");
+#else
+        snprintf(unique_bin_name, sizeof(unique_bin_name), ".yi_run_out");
+#endif
+    }
+
 #if defined(__APPLE__)
-        bool macos_bundle_mode = uses_cogito;
+        bool macos_bundle_mode = uses_ext_module;
         char macos_bundle_id[256];
         macos_bundle_id[0] = '\0';
         if (macos_bundle_mode) {
@@ -621,6 +618,7 @@ int main(int argc, char **argv) {
 
         if (cache_enabled && cache_bin && path_is_file(cache_bin)) {
             int rc = run_binary_with_args(cache_bin, run_argc, run_argv);
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -630,10 +628,10 @@ int main(int argc, char **argv) {
         }
 
         // When not using cache, check if binary is up-to-date.
-        // For Cogito apps we skip this shortcut because SUM can be embedded
+        // For apps using external modules we skip this shortcut because SUM can be embedded
         // from external files (e.g. cogito.load_sum("...")), and those files
         // are not tracked by this single source mtime check.
-        if (!cache_enabled && !uses_cogito && path_is_file(unique_bin_name)) {
+        if (!cache_enabled && !uses_ext_module && !is_self_host_entry && path_is_file(unique_bin_name)) {
             long long bin_mtime = path_mtime(unique_bin_name);
             long long src_mtime = path_mtime(entry);
             if (bin_mtime >= 0 && src_mtime >= 0 && bin_mtime >= src_mtime) {
@@ -645,6 +643,7 @@ int main(int argc, char **argv) {
                 snprintf(run_cmd_buf, sizeof(run_cmd_buf), "./%s", unique_bin_name);
 #endif
                 int rc = run_binary_with_args(run_cmd_buf, run_argc, run_argv);
+                free(ext_bindings_alloc);
                 arena_free(&arena);
                 return rc == 0 ? 0 : 1;
             }
@@ -653,6 +652,7 @@ int main(int argc, char **argv) {
         prog = lower_program(prog, &arena, &err);
         if (!prog || err.message) {
             diag_print_enhanced(&err, verbose_mode);
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -662,6 +662,7 @@ int main(int argc, char **argv) {
         }
         if (!typecheck_program(prog, &arena, &err)) {
             diag_print_enhanced(&err, verbose_mode);
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -669,7 +670,7 @@ int main(int argc, char **argv) {
             arena_free(&arena);
             return 1;
         }
-        const char *c_path = cache_c ? cache_c : ".yi_run.c";
+        const char *c_path = cache_c ? cache_c : (is_self_host_entry ? ".yi_run_compile_out.c" : ".yi_run.c");
         const char *bin_path = cache_bin ? cache_bin : unique_bin_name;
 
         char run_cmd_buf[1024];
@@ -679,8 +680,9 @@ int main(int argc, char **argv) {
         snprintf(run_cmd_buf, sizeof(run_cmd_buf), "./%s", unique_bin_name);
 #endif
         const char *run_cmd = cache_bin ? cache_bin : run_cmd_buf;
-        if (!emit_c(prog, c_path, uses_cogito, &err)) {
+        if (!emit_c(prog, c_path, ext_module_name, ext_bindings_path_str, &err)) {
             diag_print_enhanced(&err, verbose_mode);
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -692,6 +694,7 @@ int main(int argc, char **argv) {
         if (macos_bundle_mode) {
             if (!prepare_macos_app_bundle(bin_path, macos_bundle_id, name_without_ext)) {
                 fprintf(stderr, "error: failed to prepare macOS app bundle (%s)\n", name_without_ext);
+                free(ext_bindings_alloc);
                 free(cache_base);
                 free(cache_dir);
                 free(cache_c);
@@ -706,6 +709,7 @@ int main(int argc, char **argv) {
                          cc_path(), cc_flags(), extra_cflags, c_path, bin_path, extra_ldflags);
         if (n < 0 || (size_t)n >= sizeof(cmd)) {
             fprintf(stderr, "error: compile command too long\n");
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -716,6 +720,7 @@ int main(int argc, char **argv) {
         int rc = system(cmd);
         if (rc != 0) {
             fprintf(stderr, "error: C compiler failed (code %d)\n", rc);
+            free(ext_bindings_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -727,6 +732,12 @@ int main(int argc, char **argv) {
         if (emit_c_to && emit_c_to[0]) {
             if (!path_is_file(c_path)) {
                 fprintf(stderr, "error: C file was not written\n");
+                free(ext_bindings_alloc);
+                free(cache_base);
+                free(cache_dir);
+                free(cache_c);
+                free(cache_bin);
+                arena_free(&arena);
                 return 1;
             }
             // Copy to user-requested path for inspection (e.g. debugging codegen)
@@ -736,6 +747,12 @@ int main(int argc, char **argv) {
                 if (src) fclose(src);
                 if (dst) fclose(dst);
                 fprintf(stderr, "error: cannot copy C to %s\n", emit_c_to);
+                free(ext_bindings_alloc);
+                free(cache_base);
+                free(cache_dir);
+                free(cache_c);
+                free(cache_bin);
+                arena_free(&arena);
                 return 1;
             }
             char buf[4096];
@@ -745,6 +762,7 @@ int main(int argc, char **argv) {
             fclose(src);
             fclose(dst);
             (void)remove(c_path);
+            free(ext_bindings_alloc);
             arena_free(&arena);
             free(cache_base);
             free(cache_dir);
@@ -761,6 +779,7 @@ int main(int argc, char **argv) {
         // Release it before running user code to reduce peak RSS.
         arena_free(&arena);
         rc = run_binary_with_args(run_cmd, run_argc, run_argv);
+        free(ext_bindings_alloc);
         free(cache_base);
         free(cache_dir);
         free(cache_c);

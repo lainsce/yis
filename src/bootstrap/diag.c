@@ -261,14 +261,14 @@ static const char *get_error_tip(const char *msg) {
     if (strstr(msg, "'.e' files are no longer supported")) {
         return "Rename your file from .e to .yi extension.";
     }
-    if (strstr(msg, "bring expects stdr/math/cogito")) {
-        return "Use 'bring stdr;', 'bring math;', 'bring cogito;', or a valid .yi file path.";
+    if (strstr(msg, "bring expects a stdlib module")) {
+        return "Use 'bring stdr;', 'bring math;', a valid external module name, or a valid .yi file path.";
     }
     if (strstr(msg, "stdr.yi not found")) {
         return "The standard library is not installed. Set YIS_STDLIB to the stdlib directory.";
     }
-    if (strstr(msg, "Cogito GUI framework not found")) {
-        return "Cogito is required for GUI applications. Install/build Cogito and ensure cogito.yi is in your stdlib path.";
+    if (strstr(msg, "external module") && strstr(msg, "not found")) {
+        return "The external module was not found. Install it and ensure its .yi file is in the stdlib path, or set YIS_<NAME>_PATH.";
     }
     if (strstr(msg, "missing entry() in init.yi")) {
         return "Your main file needs an entry() function: 'entry() { ... }'.";
@@ -357,11 +357,11 @@ static const char *get_error_tip(const char *msg) {
     if (strstr(msg, "C compiler failed")) {
         return "The C compiler encountered an error. Check the generated C code or your C compiler setup.";
     }
-    if (strstr(msg, "cogito") && strstr(msg, "linker")) {
-        return "Cogito library linking failed. Ensure libcogito is installed or set YIS_COGITO_FLAGS with the correct linker path.";
+    if (strstr(msg, "module") && strstr(msg, "linker")) {
+        return "Module library linking failed. Ensure the library is installed or set YIS_<NAME>_FLAGS with the correct linker path.";
     }
     if (strstr(msg, "raylib") && (strstr(msg, "not found") || strstr(msg, "undefined"))) {
-        return "Raylib is required for Cogito GUI apps. Install it: 'brew install raylib' (macOS) or see docs.";
+        return "Raylib is required for GUI apps using external modules. Install it: 'brew install raylib' (macOS) or see docs.";
     }
     if (strstr(msg, "compile command too long")) {
         return "The compilation command exceeded the buffer size. Try moving files to a shorter path.";

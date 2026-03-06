@@ -1,9 +1,9 @@
 project('yis', 'c',
-  version : '0.1.0',
-  default_options : ['warning_level=2', 'c_std=c11']
+  version : '1.0.0',
+  default_options : ['warning_level=2', 'c_std=c11', 'cpp_std=c++17']
 )
 
-add_project_arguments('-O3', '-march=native', language : 'c')
+add_project_arguments('-march=native', language : 'c')
 
 yis_c_sources = files(
   'src/bootstrap/main.c',
@@ -18,6 +18,7 @@ yis_c_sources = files(
   'src/bootstrap/arena.c',
   'src/bootstrap/str.c',
   'src/bootstrap/diag.c',
+  'src/bootstrap/external_module.c',
 )
 
 yis_c_includes = include_directories('src', 'src/bootstrap')
@@ -36,7 +37,7 @@ yis_target = custom_target(
   command : [
     'sh',
     '-c',
-    'ROOT="$3" && rm -f "$ROOT/init" "$ROOT/init.c" "$2" && cd "$ROOT" && YIS_STDLIB="$ROOT/src/stdlib" "$1" run "$ROOT/src/init.yi" -- "$ROOT/src/init.yi" && mv "$ROOT/init" "$2" && rm -f "$ROOT/init" "$ROOT/init.c"',
+    'ROOT="$3" && rm -f "$ROOT/.yi_out" "$ROOT/.yi_compile_out.c" "$ROOT/.yi_run_out" "$ROOT/.yi_run_compile_out.c" "$2" && cd "$ROOT" && YIS_STDLIB="$ROOT/src/stdlib" "$1" run "$ROOT/src/init.yi" -- "$ROOT/src/init.yi" && mv "$ROOT/.yi_out" "$2" && rm -f "$ROOT/.yi_out" "$ROOT/.yi_compile_out.c" "$ROOT/.yi_run_out" "$ROOT/.yi_run_compile_out.c"',
     'sh',
     yis_bootstrap,
     meson.current_build_dir() / 'yis',

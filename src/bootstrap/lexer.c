@@ -563,39 +563,6 @@ static bool append_octal_escape(Lexer *lx, CharVec *buf, Diag *err, int line, in
     return append_utf8(buf, (uint32_t)value, err, lx);
 }
 
-static bool consume_interp_group(Lexer *lx, char open, char close, Diag *err, int line, int col) {
-    int depth = 1;
-    adv(lx, 1);
-    while (lx->i < lx->len && depth > 0) {
-        char c = peek(lx, 0);
-        if (c == '\n' || c == '\0') {
-            return set_error(lx, err, line, col, "unterminated interpolation expression");
-        }
-        if (c == '\\') {
-            adv(lx, 1);
-            if (lx->i < lx->len) {
-                adv(lx, 1);
-            }
-            continue;
-        }
-        if (c == open) {
-            depth++;
-            adv(lx, 1);
-            continue;
-        }
-        if (c == close) {
-            depth--;
-            adv(lx, 1);
-            continue;
-        }
-        adv(lx, 1);
-    }
-    if (depth != 0) {
-        return set_error(lx, err, line, col, "unterminated interpolation expression");
-    }
-    return true;
-}
-
 bool lex_source(const char *path, const char *src, size_t len, Arena *arena, TokVec *out, Diag *err) {
     if (!out) {
         return false;

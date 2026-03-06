@@ -461,6 +461,7 @@ typedef struct {
     size_t loop_stack_cap;
 
     bool uses_cogito;
+    const char *ext_module_name;
 
     // Hash map caches for env lookups
     StrMap class_map;       // qname -> index into env->classes
@@ -2138,8 +2139,12 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                     Ty *base_ty_idx = cg_tc_expr(cg, path, e->as.assign.target->as.index.a, err);
                     if (base_ty_idx && base_ty_idx->tag == TY_DICT) {
                         w_line(&cg->w, "yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, it.tmp, vt.tmp);
-                    } else {
+                    } else if (base_ty_idx && base_ty_idx->tag == TY_ARRAY) {
                         w_line(&cg->w, "yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, it.tmp, vt.tmp);
+                    } else {
+                        w_line(&cg->w, "if (%s.tag == EVT_DICT) yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, at.tmp, it.tmp, vt.tmp);
+                        w_line(&cg->w, "else if (%s.tag == EVT_ARR) yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, at.tmp, it.tmp, vt.tmp);
+                        w_line(&cg->w, "else yis_trap(\"index assignment expects array or dict\");");
                     }
                     w_line(&cg->w, "yis_release_val(%s);", at.tmp);
                     w_line(&cg->w, "yis_release_val(%s);", it.tmp);
@@ -2215,11 +2220,20 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
                         w_line(&cg->w, "yis_retain_val(%s);", tret);
                         w_line(&cg->w, "yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, it.tmp, tret);
-                    } else {
+                    } else if (base_ty->tag == TY_ARRAY) {
                         w_line(&cg->w, "YisVal %s = yis_arr_get((YisArr*)%s.as.p, yis_as_int(%s));", cur, at.tmp, it.tmp);
                         w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
                         w_line(&cg->w, "yis_retain_val(%s);", tret);
                         w_line(&cg->w, "yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, it.tmp, tret);
+                    } else {
+                        w_line(&cg->w, "YisVal %s = YV_NULLV;", cur);
+                        w_line(&cg->w, "if (%s.tag == EVT_DICT) %s = yis_dict_get((YisDict*)%s.as.p, %s);", at.tmp, cur, at.tmp, it.tmp);
+                        w_line(&cg->w, "else if (%s.tag == EVT_ARR) %s = yis_arr_get((YisArr*)%s.as.p, yis_as_int(%s));", at.tmp, cur, at.tmp, it.tmp);
+                        w_line(&cg->w, "else yis_trap(\"compound index assignment expects array or dict\");");
+                        w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
+                        w_line(&cg->w, "yis_retain_val(%s);", tret);
+                        w_line(&cg->w, "if (%s.tag == EVT_DICT) yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, at.tmp, it.tmp, tret);
+                        w_line(&cg->w, "else yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, it.tmp, tret);
                     }
                     w_line(&cg->w, "yis_release_val(%s);", cur);
                     w_line(&cg->w, "yis_release_val(%s);", at.tmp);
@@ -2577,6 +2591,40 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         w_line(&cg->w, "yis_release_val(%s);", cmdv.tmp);
                         gen_expr_release_except(cg, &cmdv, cmdv.tmp);
                         gen_expr_free(&cmdv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__file_exists")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__file_exists expects 1 arg");
+                        GenExpr pathv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &pathv, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_file_exists(%s);", t, pathv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", pathv.tmp);
+                        gen_expr_release_except(cg, &pathv, pathv.tmp);
+                        gen_expr_free(&pathv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__file_mtime")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__file_mtime expects 1 arg");
+                        GenExpr pathv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &pathv, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_file_mtime(%s);", t, pathv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", pathv.tmp);
+                        gen_expr_release_except(cg, &pathv, pathv.tmp);
+                        gen_expr_free(&pathv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__getcwd")) {
+                        if (e->as.call.args_len != 0) return cg_set_err(err, path, "__getcwd expects 0 args");
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_getcwd();", t);
                         gen_expr_add(out, t);
                         out->tmp = t;
                         return true;
@@ -3483,15 +3531,15 @@ static void codegen_free(Codegen *cg) {
     sb_free(&cg->out);
 }
 
-static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
-    cg->uses_cogito = uses_cogito;
+static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ext_bindings_path, Diag *err) {
+    cg->uses_cogito = (ext_module_name != NULL);
+    cg->ext_module_name = ext_module_name;
     codegen_collect_lambdas(cg);
 
     const char *runtime_override = getenv("YIS_RUNTIME");
     bool runtime_forced = runtime_override && runtime_override[0];
     const char *runtime_path = runtime_forced ? runtime_override : NULL;
     char *exe_runtime_path = NULL;  // heap-allocated, freed below
-    char *exe_cogito_bindings_path = NULL;  // heap-allocated, freed below
     if (!runtime_path) {
         const char *runtime_candidates[] = {
             "src/bootstrap/runtime.inc",
@@ -3558,80 +3606,16 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
 
     size_t cogito_bindings_len = 0;
     const char *cogito_bindings_src = NULL;
-    if (uses_cogito) {
-        const char *bindings_override = getenv("YIS_COGITO_BINDINGS");
-        bool bindings_forced = bindings_override && bindings_override[0];
-        const char *bindings_path = bindings_forced ? bindings_override : NULL;
-
-        if (!bindings_path) {
-            const char *bindings_candidates[] = {
-                "src/yis/cogito_bindings.inc",
-                "../src/yis/cogito_bindings.inc",
-                "../../src/yis/cogito_bindings.inc",
-                "Cogito/src/yis/cogito_bindings.inc",
-                "cogito/yis/cogito_bindings.inc",
-                "cogito/src/yis/cogito_bindings.inc",        // split-repo layout
-                "../Cogito/yis/cogito_bindings.inc",
-                "../Cogito/src/yis/cogito_bindings.inc",
-                "../../Cogito/yis/cogito_bindings.inc",
-                "../../Cogito/src/yis/cogito_bindings.inc",
-                "../cogito/yis/cogito_bindings.inc",
-                "../cogito/src/yis/cogito_bindings.inc",     // split-repo layout
-                "../../cogito/yis/cogito_bindings.inc",
-                "../../cogito/src/yis/cogito_bindings.inc",  // split-repo layout
-#if defined(__APPLE__)
-                "/opt/homebrew/share/yis/cogito/cogito_bindings.inc",
-                "/usr/local/share/yis/cogito/cogito_bindings.inc",
-#endif
-                "/usr/share/yis/cogito/cogito_bindings.inc",
-            };
-            for (size_t i = 0; i < sizeof(bindings_candidates) / sizeof(bindings_candidates[0]); i++) {
-                if (path_is_file(bindings_candidates[i])) {
-                    bindings_path = bindings_candidates[i];
-                    break;
-                }
-            }
-
-            if (!bindings_path) {
-                char *exe_dir = yis_exe_dir();
-                if (exe_dir) {
-                    const char *exe_rel[] = {
-                        "../share/yis/cogito/cogito_bindings.inc",
-                        "../../share/yis/cogito/cogito_bindings.inc",
-                        "../Resources/share/yis/cogito/cogito_bindings.inc",
-                    };
-                    for (size_t i = 0; i < sizeof(exe_rel) / sizeof(exe_rel[0]); i++) {
-                        char *candidate = path_join(exe_dir, exe_rel[i]);
-                        if (candidate && path_is_file(candidate)) {
-                            exe_cogito_bindings_path = candidate;
-                            bindings_path = exe_cogito_bindings_path;
-                            break;
-                        }
-                        free(candidate);
-                    }
-                    free(exe_dir);
-                }
-            }
-        }
-
-        if (bindings_path && bindings_path[0]) {
-            char *bindings_src =
-                read_file_with_includes(bindings_path, "// @include", &tmp_arena, &cogito_bindings_len, NULL);
-            if (bindings_src) {
-                cogito_bindings_src = bindings_src;
-            } else if (bindings_forced) {
-                arena_free(&tmp_arena);
-                free(exe_runtime_path);
-                free(exe_cogito_bindings_path);
-                return cg_set_err(err, (Str){bindings_path, strlen(bindings_path)},
-                                  "failed to read cogito bindings file");
-            }
-        } else if (bindings_forced) {
+    if (ext_bindings_path && ext_bindings_path[0]) {
+        char *bindings_src =
+            read_file_with_includes(ext_bindings_path, "// @include", &tmp_arena, &cogito_bindings_len, NULL);
+        if (bindings_src) {
+            cogito_bindings_src = bindings_src;
+        } else {
             arena_free(&tmp_arena);
             free(exe_runtime_path);
-            free(exe_cogito_bindings_path);
-            return cg_set_err(err, (Str){bindings_override, strlen(bindings_override)},
-                              "YIS_COGITO_BINDINGS points to a missing file");
+            return cg_set_err(err, (Str){ext_bindings_path, strlen(ext_bindings_path)},
+                              "failed to read module bindings file");
         }
     }
 
@@ -3639,14 +3623,12 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
     if (runtime_len == 0 || runtime_src[runtime_len - 1] != '\n') {
         sb_append_char(&cg->out, '\n');
     }
-    if (uses_cogito) {
+    if (cg->uses_cogito) {
         if (!cogito_bindings_src || cogito_bindings_len == 0) {
             arena_free(&tmp_arena);
             free(exe_runtime_path);
-            free(exe_cogito_bindings_path);
-            return cg_set_err(err, (Str){0}, "program imports cogito but cogito bindings file was not found");
+            return cg_set_err(err, (Str){0}, "program imports external module but bindings file was not found");
         }
-        // Cogito bindings will check COGITO_DEFINED_COGITO_DEBUG_ENABLED (defined in runtime.inc)
         sb_append_n(&cg->out, cogito_bindings_src, cogito_bindings_len);
         if (cogito_bindings_src[cogito_bindings_len - 1] != '\n') {
             sb_append_char(&cg->out, '\n');
@@ -3654,7 +3636,6 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
     }
     arena_free(&tmp_arena);
     free(exe_runtime_path);
-    free(exe_cogito_bindings_path);
     exe_runtime_path = NULL;
 
     w_line(&cg->w, "// ---- cask globals ----");
@@ -3964,7 +3945,7 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
     w_line(&cg->w, "@autoreleasepool {");
     cg->w.indent++;
     w_line(&cg->w, "yis_runtime_init();");
-    // Set script directory when entry_path is available AND using cogito
+    // Set script directory when entry_path is available AND using an external module
     if (cg->uses_cogito && cg->entry_path.data && cg->entry_path.len > 0) {
         // Find the directory of the entry script
         const char *path = cg->entry_path.data;
@@ -3979,7 +3960,7 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
             memcpy(dir, path, dir_len);
             dir[dir_len] = 0;
             w_line(&cg->w, "YisVal __script_dir = YV_STR(stdr_str_lit(\"%s\"));", dir);
-            w_line(&cg->w, "__cogito_set_script_dir(__script_dir);");
+            w_line(&cg->w, "__%s_set_script_dir(__script_dir);", cg->ext_module_name);
             w_line(&cg->w, "yis_release_val(__script_dir);");
         } else {
         }
@@ -3990,7 +3971,7 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
     w_line(&cg->w, "}");
     w_line(&cg->w, "#else");
     w_line(&cg->w, "yis_runtime_init();");
-    // Set script directory when entry_path is available AND using cogito
+    // Set script directory when entry_path is available AND using an external module
     if (cg->uses_cogito && cg->entry_path.data && cg->entry_path.len > 0) {
         const char *path = cg->entry_path.data;
         size_t len = cg->entry_path.len;
@@ -4004,7 +3985,7 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
             memcpy(dir, path, dir_len);
             dir[dir_len] = 0;
             w_line(&cg->w, "YisVal __script_dir = YV_STR(stdr_str_lit(\"%s\"));", dir);
-            w_line(&cg->w, "__cogito_set_script_dir(__script_dir);");
+            w_line(&cg->w, "__%s_set_script_dir(__script_dir);", cg->ext_module_name);
             w_line(&cg->w, "yis_release_val(__script_dir);");
         }
     }
@@ -4015,7 +3996,9 @@ static bool codegen_gen(Codegen *cg, bool uses_cogito, Diag *err) {
     w_line(&cg->w, "}");
     return true;
 }
-bool emit_c(Program *prog, const char *out_path, bool uses_cogito, Diag *err) {
+bool emit_c(Program *prog, const char *out_path,
+            const char *ext_module_name, const char *ext_bindings_path,
+            Diag *err) {
     if (!prog || !out_path) {
         return cg_set_err(err, (Str){NULL, 0}, "emit_c: missing program or output path");
     }
@@ -4026,7 +4009,7 @@ bool emit_c(Program *prog, const char *out_path, bool uses_cogito, Diag *err) {
         arena_free(&arena);
         return false;
     }
-    if (!codegen_gen(&cg, uses_cogito, err)) {
+    if (!codegen_gen(&cg, ext_module_name, ext_bindings_path, err)) {
         codegen_free(&cg);
         arena_free(&arena);
         return false;

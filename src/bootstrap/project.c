@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "external_module.h"
 #include "file.h"
 #include "lexer.h"
 #include "parser.h"
@@ -301,43 +302,64 @@ static Module *load_file(const char *path,
             free(p);
             continue;
         }
-        // Cogito module resolution (yis-local copy)
-#include "cogito_resolve.inc"
-        char *name = str_to_c(imp->name);
-        if (!name) {
-            set_err(err, abs_path, "out of memory");
-            return NULL;
-        }
-        if (str_ends_with(imp->name, ".e")) {
-            free(name);
-            set_err(err, abs_path, "'.e' files are no longer supported; use .yi");
-            return NULL;
-        }
-        if (!str_ends_with(imp->name, ".yi")) {
-            size_t nlen = strlen(name);
-            char *with_ext = (char *)malloc(nlen + 4);
-            if (!with_ext) {
-                free(name);
+        // Try generic external module resolution
+        {
+            char *imp_name_c = str_to_c(imp->name);
+            if (!imp_name_c) {
                 set_err(err, abs_path, "out of memory");
                 return NULL;
             }
-            memcpy(with_ext, name, nlen);
-            memcpy(with_ext + nlen, ".yi", 3);
+            char *ext_path = resolve_external_module(imp_name_c, stdlib_dir);
+            if (ext_path) {
+                if (!load_file(ext_path, root_dir, stdlib_dir, arena, visited, hash, err)) {
+                    free(ext_path);
+                    free(imp_name_c);
+                    return NULL;
+                }
+                free(ext_path);
+                free(imp_name_c);
+                continue;
+            }
+            free(imp_name_c);
+        }
+        // Fall back to user cask (relative .yi file)
+        {
+            char *name = str_to_c(imp->name);
+            if (!name) {
+                set_err(err, abs_path, "out of memory");
+                return NULL;
+            }
+            if (str_ends_with(imp->name, ".e")) {
+                free(name);
+                set_err(err, abs_path, "'.e' files are no longer supported; use .yi");
+                return NULL;
+            }
+            if (!str_ends_with(imp->name, ".yi")) {
+                size_t nlen = strlen(name);
+                char *with_ext = (char *)malloc(nlen + 4);
+                if (!with_ext) {
+                    free(name);
+                    set_err(err, abs_path, "out of memory");
+                    return NULL;
+                }
+                memcpy(with_ext, name, nlen);
+                memcpy(with_ext + nlen, ".yi", 3);
+                free(name);
+                name = with_ext;
+            }
+            char *child = path_join(root_dir, name);
             free(name);
-            name = with_ext;
-        }
-        char *child = path_join(root_dir, name);
-        free(name);
-        if (!child || !path_is_file(child)) {
-            set_err(err, abs_path, "bring expects stdr/math/cogito or a valid user cask (file)");
+            if (!child || !path_is_file(child)) {
+                set_err(err, abs_path, "bring expects a stdlib module, external module, or valid user cask (file)");
+                free(child);
+                return NULL;
+            }
+            if (!load_file(child, root_dir, stdlib_dir, arena, visited, hash, err)) {
+                free(child);
+                return NULL;
+            }
             free(child);
-            return NULL;
         }
-        if (!load_file(child, root_dir, stdlib_dir, arena, visited, hash, err)) {
-            free(child);
-            return NULL;
-        }
-        free(child);
     }
 
     return mod;

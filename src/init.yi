@@ -22,6 +22,7 @@ def ?g_scope_names = []: [string => any]
 def ?g_scope_order = []: [any]
 def ?g_global_def_names = []: [string => any]
 def ?g_def_types = []: [string => any]
+def ?g_bring_names = []: [string => any]
 def ?g_lambda_meta = []: [string => any]
 def ?g_lambda_ids = []: [any]
 def ?g_next_lambda_id = 1
@@ -276,9 +277,72 @@ fun interp_path_to_c(raw = string) (( any )) {
   return out
 }
 
+fun is_stdlib_module(name = string) (( bool )) {
+  if name == "stdr" || name == "math" || name == "net" || name == "json" { return true }
+  return false
+}
+
+fun is_external_module(name = string) (( bool )) {
+  if is_stdlib_module(name) { return false }
+  if stdr.len(name) == 0 { return false }
+  -- Check env var: YIS_<NAME>_PATH
+  let ?env_name = "YIS_"
+  let upper_name = str_to_upper(name)
+  env_name = stdr.str_concat(env_name, upper_name)
+  env_name = stdr.str_concat(env_name, "_PATH")
+  if env_nonempty(env_name) { return true }
+  -- Check if found in stdlib search (installed via {datadir}/yis/stdlib/{name}.yi)
+  let p = resolve_stdlib_module_path(name)
+  if stdr.len(p) > 0 { return true }
+  -- Check dev-relative paths: ../{name}/src/{name}.yi etc
+  let ?dp = stdr.str_concat(stdr.str_concat("../", name), stdr.str_concat("/src/", stdr.str_concat(name, ".yi")))
+  if stdr.file_exists(dp) { return true }
+  dp = stdr.str_concat(stdr.str_concat("../../", name), stdr.str_concat("/src/", stdr.str_concat(name, ".yi")))
+  if stdr.file_exists(dp) { return true }
+  return false
+}
+
+fun str_to_upper(text = string) (( string )) {
+  let ?out = ""
+  let ?i = 0
+  let n = stdr.len(text)
+  for (; i < n; i = i + 1) {
+    let ch = stdr.slice(text, i, i + 1)
+    if ch == "a" { out = stdr.str_concat(out, "A") }
+    elif ch == "b" { out = stdr.str_concat(out, "B") }
+    elif ch == "c" { out = stdr.str_concat(out, "C") }
+    elif ch == "d" { out = stdr.str_concat(out, "D") }
+    elif ch == "e" { out = stdr.str_concat(out, "E") }
+    elif ch == "f" { out = stdr.str_concat(out, "F") }
+    elif ch == "g" { out = stdr.str_concat(out, "G") }
+    elif ch == "h" { out = stdr.str_concat(out, "H") }
+    elif ch == "i" { out = stdr.str_concat(out, "I") }
+    elif ch == "j" { out = stdr.str_concat(out, "J") }
+    elif ch == "k" { out = stdr.str_concat(out, "K") }
+    elif ch == "l" { out = stdr.str_concat(out, "L") }
+    elif ch == "m" { out = stdr.str_concat(out, "M") }
+    elif ch == "n" { out = stdr.str_concat(out, "N") }
+    elif ch == "o" { out = stdr.str_concat(out, "O") }
+    elif ch == "p" { out = stdr.str_concat(out, "P") }
+    elif ch == "q" { out = stdr.str_concat(out, "Q") }
+    elif ch == "r" { out = stdr.str_concat(out, "R") }
+    elif ch == "s" { out = stdr.str_concat(out, "S") }
+    elif ch == "t" { out = stdr.str_concat(out, "T") }
+    elif ch == "u" { out = stdr.str_concat(out, "U") }
+    elif ch == "v" { out = stdr.str_concat(out, "V") }
+    elif ch == "w" { out = stdr.str_concat(out, "W") }
+    elif ch == "x" { out = stdr.str_concat(out, "X") }
+    elif ch == "y" { out = stdr.str_concat(out, "Y") }
+    elif ch == "z" { out = stdr.str_concat(out, "Z") }
+    else { out = stdr.str_concat(out, ch) }
+  }
+  return out
+}
+
 fun is_capture_excluded(name = string) (( bool )) {
   if name == "" { return true }
-  if name == "stdr" || name == "math" || name == "net" || name == "json" || name == "cogito" { return true }
+  if is_stdlib_module(name) { return true }
+  if is_external_module(name) { return true }
   return false
 }
 
@@ -1046,6 +1110,118 @@ fun emit_expr(e = any, cask_name = string) (( string )) {
         r = stdr.str_concat(r, ")")
         return r
       }
+      if fname == "__write" {
+        let ?r = "stdr_write("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__writef" {
+        let ?r = "stdr_writef_args("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__read_line" {
+        return "YV_STR(stdr_read_line())"
+      }
+      if fname == "__readf_parse" {
+        let ?r = "stdr_readf_parse("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__len" {
+        let ?r = "YV_INT(stdr_len("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, "))")
+        return r
+      }
+      if fname == "__num" {
+        let ?r = "YV_INT(stdr_num("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, "))")
+        return r
+      }
+      if fname == "__slice" {
+        let a0 = emit_expr(args[0], cask_name)
+        let a1 = emit_expr(args[1], cask_name)
+        let a2 = emit_expr(args[2], cask_name)
+        let ?r = "stdr_slice("
+        r = stdr.str_concat(r, a0)
+        r = stdr.str_concat(r, ", yis_as_int(")
+        r = stdr.str_concat(r, a1)
+        r = stdr.str_concat(r, "), yis_as_int(")
+        r = stdr.str_concat(r, a2)
+        r = stdr.str_concat(r, "))")
+        return r
+      }
+      if fname == "__concat" {
+        let ?r = "stdr_array_concat("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__str_concat" {
+        let ?r = "stdr_str_concat("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__char_code" {
+        let ?r = "YV_INT(stdr_char_code("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, "))")
+        return r
+      }
+      if fname == "__read_text_file" {
+        let ?r = "stdr_read_text_file("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__write_text_file" {
+        let ?r = "stdr_write_text_file("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__open_file_dialog" {
+        let ?r = "stdr_open_file_dialog("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__save_file_dialog" {
+        let ?r = "stdr_save_file_dialog("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__run_command" {
+        let ?r = "stdr_run_command("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__file_exists" {
+        let ?r = "stdr_file_exists("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__file_mtime" {
+        let ?r = "stdr_file_mtime("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if fname == "__getcwd" {
+        return "stdr_getcwd()"
+      }
+      if fname == "__args" {
+        return "stdr_args()"
+      }
       -- Extern stub: __ prefix → call by raw name (no mangling)
       if stdr.len(fname) >= 2 {
         if stdr.slice(fname, 0, 2) == "__" {
@@ -1090,8 +1266,20 @@ fun emit_expr(e = any, cask_name = string) (( string )) {
     -- Member access without call: obj.field -> treat as dict get or struct field
     let ok = "obj"
     let fk = "field"
-    let obj_c = emit_expr(e[ok], cask_name)
+    let obj_raw = e[ok]
     let field = e[fk] ?? ""
+    -- Check if this is a brought-module constant access (e.g., gst.EVENT_EOS)
+    let ?mem_obj_tag = stdr.str(dict_get_or(obj_raw, "tag", "") ?? "")
+    if stdr.is_null(mem_obj_tag) { mem_obj_tag = "" }
+    if mem_obj_tag == "ident" {
+      let mem_obj_name = stdr.str(dict_get_or(obj_raw, "name", "") ?? "")
+      if !stdr.is_null(g_bring_names[mem_obj_name]) && mem_obj_name != cask_name {
+        let ?r = "v_"
+        r = stdr.str_concat(r, field)
+        return r
+      }
+    }
+    let obj_c = emit_expr(e[ok], cask_name)
     let ?r = "yis_dict_get((YisDict*)("
     r = stdr.str_concat(r, obj_c)
     r = stdr.str_concat(r, ").as.p, stdr_str_lit(\"")
@@ -1322,6 +1510,72 @@ fun emit_member_call(member_func = any, args = any, cask_name = string) (( strin
         r = stdr.str_concat(r, "))")
         return r
       }
+      if field == "write" {
+        let ?r = "stdr_write("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "writef" {
+        let ?r = "stdr_writef_args("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "readf_parse" {
+        let ?r = "stdr_readf_parse("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "read_text_file" {
+        let ?r = "stdr_read_text_file("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "write_text_file" {
+        let ?r = "stdr_write_text_file("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "run_command" {
+        let ?r = "stdr_run_command("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "file_exists" {
+        let ?r = "stdr_file_exists("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "file_mtime" {
+        let ?r = "stdr_file_mtime("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "getcwd" {
+        return "stdr_getcwd()"
+      }
+      if field == "args" {
+        return "stdr_args()"
+      }
+      if field == "open_file_dialog" {
+        let ?r = "stdr_open_file_dialog("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
+      if field == "save_file_dialog" {
+        let ?r = "stdr_save_file_dialog("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
       if field == "concat" {
         let ?r = "stdr_array_concat("
         r = emit_args(args, r, cask_name)
@@ -1367,6 +1621,14 @@ fun emit_member_call(member_func = any, args = any, cask_name = string) (( strin
         r = stdr.str_concat(r, "))")
         return r
       }
+      let stdr_funs = dict_get_or(g_mod_funs, "stdr", null)
+      if !stdr.is_null(dict_get_or(stdr_funs, field, null)) {
+        let ?r = mangle_name("stdr", field)
+        r = stdr.str_concat(r, "(")
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
       let ?r = "stdr_"
       r = stdr.str_concat(r, field)
       r = stdr.str_concat(r, "(")
@@ -1375,12 +1637,24 @@ fun emit_member_call(member_func = any, args = any, cask_name = string) (( strin
       return r
     }
 
-    if obj_name == "cogito" {
-      let ?r = mangle_name("cogito", field)
+    if is_external_module(obj_name) {
+      let ?r = mangle_name(obj_name, field)
       r = stdr.str_concat(r, "(")
       r = emit_args(args, r, cask_name)
       r = stdr.str_concat(r, ")")
       return r
+    }
+
+    -- Check if obj_name is a locally-brought module
+    if !stdr.is_null(g_bring_names[obj_name]) && obj_name != cask_name {
+      let mod_funs = dict_get_or(g_mod_funs, obj_name, null)
+      if !stdr.is_null(mod_funs) {
+        let ?r = mangle_name(obj_name, field)
+        r = stdr.str_concat(r, "(")
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        return r
+      }
     }
 
     let vtype_any = dict_get_or(g_var_types, obj_name, "")
@@ -1428,6 +1702,20 @@ fun emit_member_call(member_func = any, args = any, cask_name = string) (( strin
           }
         }
       }
+    }
+
+    let local_funs = dict_get_or(g_mod_funs, cask_name, null)
+    if !stdr.is_null(dict_get_or(local_funs, field, null)) {
+      let obj_c = emit_expr(obj, cask_name)
+      let ?r = mangle_name(cask_name, field)
+      r = stdr.str_concat(r, "(")
+      r = stdr.str_concat(r, obj_c)
+      if stdr.len(args) > 0 {
+        r = stdr.str_concat(r, ", ")
+        r = emit_args(args, r, cask_name)
+      }
+      r = stdr.str_concat(r, ")")
+      return r
     }
 
     let ?r = "yis_"
@@ -1968,6 +2256,9 @@ fun emit_fun(d = any, cask_name = string) (( string )) {
   }
   if np == 0 { out = stdr.str_concat(out, "void") }
   out = stdr.str_concat(out, ") {\n")
+  if cask_name == "stdr" && name == "str" && stdr.len(body) == 0 {
+    out = stdr.str_concat(out, "  return YV_STR(stdr_to_string(v_x));\n")
+  }
   out = stdr.str_concat(out, emit_stmts(body, "  ", cask_name))
   out = stdr.str_concat(out, "}\n\n")
 
@@ -2460,6 +2751,16 @@ fun emit_unit(ast = any) (( string )) {
     stdr.push(p, "}\n\n")
   }
 
+  -- Emit any additional lambda wrappers created during def init emission
+  let ?li2 = li
+  for (; li2 < stdr.len(g_lambda_ids); li2 = li2 + 1) {
+    let lid2 = g_lambda_ids[li2]
+    let lmeta2 = g_lambda_meta[stdr.str(lid2)]
+    if !stdr.is_null(lmeta2) {
+      stdr.push(p, emit_lambda_wrapper(lmeta2))
+    }
+  }
+
   return join_parts(p)
 }
 
@@ -2839,7 +3140,112 @@ fun env_nonempty(name = string) (( bool )) {
   return code == 0
 }
 
-fun cogito_run_c_artifact(entry_path = string, source_raw = string) (( string )) {
+-- Extract set_appid("...") from source text without parsing
+fun extract_appid_from_source(source = string) (( string )) {
+  let marker = "set_appid(\""
+  let pos = str_find(source, marker)
+  if pos < 0 { return "" }
+  let start = pos + stdr.len(marker)
+  let rest = stdr.slice(source, start, start + 200)
+  let close = str_find(rest, "\"")
+  if close <= 0 { return "" }
+  return sanitize_filename_component(stdr.slice(rest, 0, close))
+}
+
+-- Compute the manifest path for a run-mode entry file
+-- For ext-module apps with a .app bundle, put it inside the bundle.
+fun run_manifest_path(entry_path = string, source_raw = string, ext_module = string) (( string )) {
+  let ?app_name = sanitize_filename_component(stem_name(entry_path))
+  if stdr.len(app_name) == 0 { app_name = "main" }
+  if stdr.len(ext_module) > 0 {
+    let appid = extract_appid_from_source(source_raw)
+    if stdr.len(appid) > 0 { app_name = appid }
+    let plist = stdr.str_concat(app_name, ".app/Contents/Info.plist")
+    if stdr.file_exists(plist) {
+      return stdr.str_concat(app_name, ".app/Contents/.yis_manifest")
+    }
+  }
+  return stdr.str_concat(".", stdr.str_concat(app_name, ".yis_manifest"))
+}
+
+-- Read a manifest file and return the cached out_path (first line), or ""
+fun read_manifest_out_path(manifest_path = string) (( string )) {
+  if !stdr.file_exists(manifest_path) { return "" }
+  let raw = stdr.read_text_file(manifest_path)
+  if stdr.is_null(raw) { return "" }
+  let n = stdr.len(raw)
+  if n == 0 { return "" }
+  -- Find first newline to get the out_path line
+  let ?i = 0
+  for (; i < n; i = i + 1) {
+    if stdr.slice(raw, i, i + 1) == "\n" { break }
+  }
+  if i == 0 { return "" }
+  return stdr.slice(raw, 0, i)
+}
+
+-- Write run manifest after successful compilation
+fun write_run_manifest(manifest_path = string, out_path = string, entry_path = string, ext_module_yi = string, compiler_path = string) (( -- )) {
+  let ?content = out_path
+  content = stdr.str_concat(content, "\n")
+  content = stdr.str_concat(content, entry_path)
+  content = stdr.str_concat(content, "\n")
+  if stdr.len(ext_module_yi) > 0 {
+    content = stdr.str_concat(content, ext_module_yi)
+    content = stdr.str_concat(content, "\n")
+  }
+  if stdr.len(compiler_path) > 0 {
+    content = stdr.str_concat(content, compiler_path)
+    content = stdr.str_concat(content, "\n")
+  }
+  stdr.write_text_file(manifest_path, content)
+}
+
+-- Check if binary at out_path is newer than all dep lines in the manifest
+fun check_manifest_freshness(manifest_path = string) (( string )) {
+  if !stdr.file_exists(manifest_path) { return "" }
+  let raw = stdr.read_text_file(manifest_path)
+  if stdr.is_null(raw) { return "" }
+  let n = stdr.len(raw)
+  if n == 0 { return "" }
+
+  -- Parse lines: first line is out_path, rest are dependency paths
+  let ?lines = []: [string]
+  let ?line_start = 0
+  let ?i = 0
+  for (; i < n; i = i + 1) {
+    if stdr.slice(raw, i, i + 1) == "\n" {
+      if i > line_start {
+        stdr.push(lines, stdr.slice(raw, line_start, i))
+      }
+      line_start = i + 1
+    }
+  }
+  if line_start < n {
+    stdr.push(lines, stdr.slice(raw, line_start, n))
+  }
+
+  let line_count = stdr.len(lines)
+  if line_count < 2 { return "" }
+
+  let out_path = lines[0] ?? ""
+  if !stdr.file_exists(out_path) { return "" }
+  let out_mt = stdr.file_mtime(out_path)
+  if out_mt < 0 { return "" }
+
+  -- Check each dependency
+  let ?di = 1
+  for (; di < line_count; di = di + 1) {
+    let dep = lines[di] ?? ""
+    if stdr.len(dep) == 0 { continue }
+    let dep_mt = stdr.file_mtime(dep)
+    if dep_mt < 0 { return "" }
+    if out_mt < dep_mt { return "" }
+  }
+  return out_path
+}
+
+fun ext_module_run_c_artifact(entry_path = string, source_raw = string) (( string )) {
   let ?app_name = sanitize_filename_component(stem_name(entry_path))
   if stdr.len(app_name) == 0 { app_name = "main" }
 
@@ -2848,7 +3254,7 @@ fun cogito_run_c_artifact(entry_path = string, source_raw = string) (( string ))
   let toks = lexer.lex_with_escapes(src, should_decode_escapes(entry_path))
   let ast = parser.parse(toks)
   if !stdr.is_null(ast) {
-    let appid_name = find_cogito_appid_name(ast)
+    let appid_name = find_appid_name(ast)
     if stdr.len(appid_name) > 0 {
       app_name = appid_name
     }
@@ -2869,7 +3275,7 @@ fun expr_string_literal_as_filename(e = any) (( string )) {
   return sanitize_filename_component(raw)
 }
 
-fun find_cogito_appid_expr(e = any) (( string )) {
+fun find_appid_expr(e = any) (( string )) {
   if stdr.is_null(e) { return "" }
   let et = e["tag"] ?? ""
 
@@ -2893,41 +3299,41 @@ fun find_cogito_appid_expr(e = any) (( string )) {
       }
     }
 
-    let fscan = find_cogito_appid_expr(fn)
+    let fscan = find_appid_expr(fn)
     if stdr.len(fscan) > 0 { out = fscan }
 
     let ?i = 0
     let n = stdr.len(args)
     for (; i < n; i = i + 1) {
-      let ascan = find_cogito_appid_expr(args[i])
+      let ascan = find_appid_expr(args[i])
       if stdr.len(ascan) > 0 { out = ascan }
     }
     return out
   }
 
   if et == "unary" {
-    return find_cogito_appid_expr(e["operand"])
+    return find_appid_expr(e["operand"])
   }
   if et == "binop" {
-    let ?out = find_cogito_appid_expr(e["left"])
-    let r = find_cogito_appid_expr(e["right"])
+    let ?out = find_appid_expr(e["left"])
+    let r = find_appid_expr(e["right"])
     if stdr.len(r) > 0 { out = r }
     return out
   }
   if et == "assign" {
-    let ?out = find_cogito_appid_expr(e["lhs"])
-    let r = find_cogito_appid_expr(e["rhs"])
+    let ?out = find_appid_expr(e["lhs"])
+    let r = find_appid_expr(e["rhs"])
     if stdr.len(r) > 0 { out = r }
     return out
   }
   if et == "index" {
-    let ?out = find_cogito_appid_expr(e["obj"])
-    let r = find_cogito_appid_expr(e["idx"])
+    let ?out = find_appid_expr(e["obj"])
+    let r = find_appid_expr(e["idx"])
     if stdr.len(r) > 0 { out = r }
     return out
   }
   if et == "member" {
-    return find_cogito_appid_expr(e["obj"])
+    return find_appid_expr(e["obj"])
   }
   if et == "array" {
     let elems = e["elems"] ?? []: [any]
@@ -2935,7 +3341,7 @@ fun find_cogito_appid_expr(e = any) (( string )) {
     let ?i = 0
     let n = stdr.len(elems)
     for (; i < n; i = i + 1) {
-      let r = find_cogito_appid_expr(elems[i])
+      let r = find_appid_expr(elems[i])
       if stdr.len(r) > 0 { out = r }
     }
     return out
@@ -2947,18 +3353,18 @@ fun find_cogito_appid_expr(e = any) (( string )) {
     let n = stdr.len(entries)
     for (; i < n; i = i + 1) {
       let ent = entries[i]
-      let rk = find_cogito_appid_expr(ent["key"])
+      let rk = find_appid_expr(ent["key"])
       if stdr.len(rk) > 0 { out = rk }
-      let rv = find_cogito_appid_expr(ent["value"])
+      let rv = find_appid_expr(ent["value"])
       if stdr.len(rv) > 0 { out = rv }
     }
     return out
   }
   if et == "if_expr" {
-    let ?out = find_cogito_appid_expr(e["cond"])
-    let t = find_cogito_appid_expr(e["then"])
+    let ?out = find_appid_expr(e["cond"])
+    let t = find_appid_expr(e["then"])
     if stdr.len(t) > 0 { out = t }
-    let el = find_cogito_appid_expr(e["else"])
+    let el = find_appid_expr(e["else"])
     if stdr.len(el) > 0 { out = el }
     return out
   }
@@ -2966,32 +3372,32 @@ fun find_cogito_appid_expr(e = any) (( string )) {
   return ""
 }
 
-fun find_cogito_appid_stmt(s = any) (( string )) {
+fun find_appid_stmt(s = any) (( string )) {
   if stdr.is_null(s) { return "" }
   let st = s["tag"] ?? ""
   if st == "let" || st == "const" {
-    return find_cogito_appid_expr(s["init"])
+    return find_appid_expr(s["init"])
   }
   if st == "return" {
-    return find_cogito_appid_expr(s["value"])
+    return find_appid_expr(s["value"])
   }
   if st == "expr_stmt" {
-    return find_cogito_appid_expr(s["expr"])
+    return find_appid_expr(s["expr"])
   }
   if st == "if" {
-    let ?out = find_cogito_appid_expr(s["cond"])
+    let ?out = find_appid_expr(s["cond"])
     let then_stmts = s["then"] ?? []: [any]
     let ?i = 0
     let tn = stdr.len(then_stmts)
     for (; i < tn; i = i + 1) {
-      let r = find_cogito_appid_stmt(then_stmts[i])
+      let r = find_appid_stmt(then_stmts[i])
       if stdr.len(r) > 0 { out = r }
     }
     let else_stmts = s["else"] ?? []: [any]
     i = 0
     let en = stdr.len(else_stmts)
     for (; i < en; i = i + 1) {
-      let r = find_cogito_appid_stmt(else_stmts[i])
+      let r = find_appid_stmt(else_stmts[i])
       if stdr.len(r) > 0 { out = r }
     }
     return out
@@ -3000,29 +3406,29 @@ fun find_cogito_appid_stmt(s = any) (( string )) {
     let ?out = ""
     let init_stmt = s["init_stmt"]
     if !stdr.is_null(init_stmt) {
-      let r = find_cogito_appid_stmt(init_stmt)
+      let r = find_appid_stmt(init_stmt)
       if stdr.len(r) > 0 { out = r }
     }
-    let c = find_cogito_appid_expr(s["cond"])
+    let c = find_appid_expr(s["cond"])
     if stdr.len(c) > 0 { out = c }
-    let step = find_cogito_appid_expr(s["step"])
+    let step = find_appid_expr(s["step"])
     if stdr.len(step) > 0 { out = step }
     let body = s["body"] ?? []: [any]
     let ?i = 0
     let n = stdr.len(body)
     for (; i < n; i = i + 1) {
-      let r2 = find_cogito_appid_stmt(body[i])
+      let r2 = find_appid_stmt(body[i])
       if stdr.len(r2) > 0 { out = r2 }
     }
     return out
   }
   if st == "foreach" {
-    let ?out = find_cogito_appid_expr(s["iter"])
+    let ?out = find_appid_expr(s["iter"])
     let body = s["body"] ?? []: [any]
     let ?i = 0
     let n = stdr.len(body)
     for (; i < n; i = i + 1) {
-      let r = find_cogito_appid_stmt(body[i])
+      let r = find_appid_stmt(body[i])
       if stdr.len(r) > 0 { out = r }
     }
     return out
@@ -3030,7 +3436,7 @@ fun find_cogito_appid_stmt(s = any) (( string )) {
   return ""
 }
 
-fun find_cogito_appid_name(ast = any) (( string )) {
+fun find_appid_name(ast = any) (( string )) {
   if stdr.is_null(ast) { return "" }
   let decls = ast["decls"] ?? []: [any]
   let ?out = ""
@@ -3044,13 +3450,13 @@ fun find_cogito_appid_name(ast = any) (( string )) {
       let ?j = 0
       let bn = stdr.len(body)
       for (; j < bn; j = j + 1) {
-        let r = find_cogito_appid_stmt(body[j])
+        let r = find_appid_stmt(body[j])
         if stdr.len(r) > 0 { out = r }
       }
     } elif dt == "const" || dt == "def" {
       let ?expr = d["init"]
       if stdr.is_null(expr) { expr = d["value"] }
-      let r = find_cogito_appid_expr(expr)
+      let r = find_appid_expr(expr)
       if stdr.len(r) > 0 { out = r }
     } elif dt == "class" {
       let methods = d["methods"] ?? []: [any]
@@ -3062,7 +3468,7 @@ fun find_cogito_appid_name(ast = any) (( string )) {
         let ?j = 0
         let bn = stdr.len(body)
         for (; j < bn; j = j + 1) {
-          let r = find_cogito_appid_stmt(body[j])
+          let r = find_appid_stmt(body[j])
           if stdr.len(r) > 0 { out = r }
         }
       }
@@ -3308,9 +3714,8 @@ fun prepare_macos_app_bundle(exe_path = string, bundle_id = string, bundle_name 
 
 -- Resolve a bring name to a file path. Checks src_dir/<name>.yi
 fun file_exists(path = string) (( num )) {
-  let cmd = stdr.str_concat(stdr.str_concat("test -f \"", path), "\"")
-  let res = stdr.run_command(cmd)
-  return res[0] ?? 1
+  if stdr.file_exists(path) { return 0 }
+  return 1
 }
 
 fun find_runtime_src(argv = any) (( string )) {
@@ -3506,11 +3911,14 @@ fun resolve_bring(bname = string, src_dir = string) (( string )) {
   -- Fourth try: stdlib search (env/install/dev paths)
   p = resolve_stdlib_module_path(bname)
   if stdr.len(p) > 0 { g_path_cache[cache_key] = p; return p }
-  -- Fifth try: cwd-relative paths for cogito
-  if bname == "cogito" {
-    if file_exists("../cogito/src/cogito.yi") == 0 { g_path_cache[cache_key] = "../cogito/src/cogito.yi"; return "../cogito/src/cogito.yi" }
-    if file_exists("../cogito/cogito.yi") == 0 { g_path_cache[cache_key] = "../cogito/cogito.yi"; return "../cogito/cogito.yi" }
-    if file_exists("../../cogito/src/cogito.yi") == 0 { g_path_cache[cache_key] = "../../cogito/src/cogito.yi"; return "../../cogito/src/cogito.yi" }
+  -- Fifth try: cwd-relative paths for external modules (e.g. ../name/src/name.yi)
+  if is_external_module(bname) {
+    let dev1 = stdr.str_concat(stdr.str_concat("../", bname), stdr.str_concat("/src/", stdr.str_concat(bname, ".yi")))
+    if file_exists(dev1) == 0 { g_path_cache[cache_key] = dev1; return dev1 }
+    let dev2 = stdr.str_concat(stdr.str_concat("../", bname), stdr.str_concat("/", stdr.str_concat(bname, ".yi")))
+    if file_exists(dev2) == 0 { g_path_cache[cache_key] = dev2; return dev2 }
+    let dev3 = stdr.str_concat(stdr.str_concat("../../", bname), stdr.str_concat("/src/", stdr.str_concat(bname, ".yi")))
+    if file_exists(dev3) == 0 { g_path_cache[cache_key] = dev3; return dev3 }
   }
   -- Fallback to original behavior
   p = stdr.str_concat(stdr.str_concat(src_dir, bname), ".yi")
@@ -3531,14 +3939,10 @@ fun load_module(fpath = string) (( any )) {
 }
 
 fun output_newer_than(out_path = string, dep_path = string) (( bool )) {
-  let ?cmd = "test \""
-  cmd = stdr.str_concat(cmd, out_path)
-  cmd = stdr.str_concat(cmd, "\" -nt \"")
-  cmd = stdr.str_concat(cmd, dep_path)
-  cmd = stdr.str_concat(cmd, "\"")
-  let res = stdr.run_command(cmd)
-  let code = res[0] ?? 1
-  return code == 0
+  let out_mt = stdr.file_mtime(out_path)
+  let dep_mt = stdr.file_mtime(dep_path)
+  if out_mt < 0 || dep_mt < 0 { return false }
+  return out_mt >= dep_mt
 }
 
 fun output_fresh_for_module(out_path = string, fpath = string, seen = any) (( bool )) {
@@ -4426,7 +4830,7 @@ fun collect_brings(decls = any, src_dir = string) (( any )) {
     let d = decls[i]
     if d[tag] == "bring" {
       let bname = d[name_key] ?? ""
-      if bname == "stdr" || bname == "math" { continue }
+      if bname == "math" { continue }
       if !stdr.is_null(seen[bname]) { continue }
       seen[bname] = true
       -- Also check transitive brings
@@ -4442,7 +4846,7 @@ fun collect_brings(decls = any, src_dir = string) (( any )) {
           let dd = mod_decls[j]
           if dd[tag] == "bring" {
             let sub_name = dd[name_key] ?? ""
-            if sub_name == "stdr" || sub_name == "math" || sub_name == "cogito" { continue }
+            if sub_name == "math" || is_external_module(sub_name) { continue }
             if !stdr.is_null(seen[sub_name]) { continue }
             seen[sub_name] = true
             result = stdr.concat(result, [[sub_name, mod_dir]])
@@ -4474,6 +4878,122 @@ fun collect_def_inits(decls = any) (( any )) {
   r[ck] = cname
   r[dk] = has_defs
   return r
+}
+
+-- Search for external module bindings file ({name}_bindings.inc).
+-- Checks env var YIS_<NAME>_BINDINGS first, then installed and dev paths.
+fun find_ext_module_bindings(mod_name = string) (( string )) {
+  if stdr.len(mod_name) == 0 { return "" }
+  -- Check env var first: YIS_<NAME>_BINDINGS
+  let upper = str_to_upper(mod_name)
+  let env_name = stdr.str_concat(stdr.str_concat("YIS_", upper), "_BINDINGS")
+  let env_val = _env_value(env_name)
+  if stdr.len(env_val) > 0 && file_exists(env_val) == 0 { return env_val }
+  -- Build the bindings filename: {name}_bindings.inc
+  let bfile = stdr.str_concat(mod_name, "_bindings.inc")
+  -- Installed paths: {datadir}/yis/{name}/{name}_bindings.inc
+  let ?p = ""
+  p = stdr.str_concat(stdr.str_concat("/opt/homebrew/share/yis/", mod_name), stdr.str_concat("/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("/usr/local/share/yis/", mod_name), stdr.str_concat("/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("/usr/share/yis/", mod_name), stdr.str_concat("/", bfile))
+  if file_exists(p) == 0 { return p }
+  -- Dev paths: src/yis/{name}_bindings.inc, ../{name}/src/yis/{name}_bindings.inc
+  p = stdr.str_concat("src/yis/", bfile)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat("../src/yis/", bfile)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat("../../src/yis/", bfile)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../", mod_name), stdr.str_concat("/src/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", mod_name), stdr.str_concat("/src/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  -- Capitalized dir variants
+  let cap_name = stdr.str_concat(str_to_upper(stdr.slice(mod_name, 0, 1)), stdr.slice(mod_name, 1, stdr.len(mod_name)))
+  p = stdr.str_concat(stdr.str_concat("../", cap_name), stdr.str_concat("/src/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", cap_name), stdr.str_concat("/src/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../", cap_name), stdr.str_concat("/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", cap_name), stdr.str_concat("/yis/", bfile))
+  if file_exists(p) == 0 { return p }
+  return ""
+}
+
+-- Auto-detect C compiler include flags (-I...) for an external module.
+-- Probes installed system paths, then dev-relative paths.
+fun detect_module_cflags(mod_name = string) (( string )) {
+  if stdr.len(mod_name) == 0 { return "" }
+  let hfile = stdr.str_concat(mod_name, ".h")
+  -- System installed: /opt/homebrew/include/{name}/{name}.h etc
+  let sys_inc = ["/opt/homebrew/include", "/usr/local/include", "/usr/include"]
+  let ?si = 0
+  let sn = stdr.len(sys_inc)
+  for (; si < sn; si = si + 1) {
+    let sd = sys_inc[si] ?? ""
+    let p = stdr.str_concat(sd, stdr.str_concat("/", stdr.str_concat(mod_name, stdr.str_concat("/", hfile))))
+    if stdr.file_exists(p) { return stdr.str_concat("-I", stdr.str_concat(sd, stdr.str_concat("/", mod_name))) }
+  }
+  -- Dev-relative paths: ../{name}/src/src, ../{name}/src
+  let dev_paths = [
+    stdr.str_concat("../", stdr.str_concat(mod_name, "/src/src")),
+    stdr.str_concat("../", stdr.str_concat(mod_name, "/src")),
+    stdr.str_concat("../../", stdr.str_concat(mod_name, "/src/src")),
+    stdr.str_concat("../../", stdr.str_concat(mod_name, "/src"))
+  ]
+  let ?di = 0
+  let dn = stdr.len(dev_paths)
+  for (; di < dn; di = di + 1) {
+    let dp = dev_paths[di] ?? ""
+    let p = stdr.str_concat(dp, stdr.str_concat("/", hfile))
+    if stdr.file_exists(p) { return stdr.str_concat("-I", dp) }
+  }
+  return ""
+}
+
+-- Auto-detect linker flags for an external module.
+-- Probes installed system paths, then dev-relative build dirs.
+fun detect_module_ldflags(mod_name = string) (( string )) {
+  if stdr.len(mod_name) == 0 { return "" }
+  let lib_name = stdr.str_concat("lib", stdr.str_concat(mod_name, ".dylib"))
+  -- System installed
+  let sys_dirs = ["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"]
+  let ?si = 0
+  let sn = stdr.len(sys_dirs)
+  for (; si < sn; si = si + 1) {
+    let sd = sys_dirs[si] ?? ""
+    let p = stdr.str_concat(sd, stdr.str_concat("/", lib_name))
+    if stdr.file_exists(p) {
+      let ?flags = stdr.str_concat("-L", sd)
+      flags = stdr.str_concat(flags, stdr.str_concat(" -l", mod_name))
+      flags = stdr.str_concat(flags, stdr.str_concat(" -Wl,-rpath,", sd))
+      return flags
+    }
+  }
+  -- Dev-relative build dirs
+  let dev_dirs = [
+    stdr.str_concat("../", stdr.str_concat(mod_name, "/build")),
+    stdr.str_concat("../", stdr.str_concat(mod_name, "/_build")),
+    stdr.str_concat("../../", stdr.str_concat(mod_name, "/build")),
+    stdr.str_concat("../../", stdr.str_concat(mod_name, "/_build"))
+  ]
+  let ?di = 0
+  let dn = stdr.len(dev_dirs)
+  for (; di < dn; di = di + 1) {
+    let dd = dev_dirs[di] ?? ""
+    let p = stdr.str_concat(dd, stdr.str_concat("/", lib_name))
+    if stdr.file_exists(p) {
+      let ?flags = stdr.str_concat("-L", dd)
+      flags = stdr.str_concat(flags, stdr.str_concat(" -l", mod_name))
+      flags = stdr.str_concat(flags, stdr.str_concat(" -Wl,-rpath,", dd))
+      return flags
+    }
+  }
+  -- Fallback: just -l{name}
+  return stdr.str_concat("-l", mod_name)
 }
 
 -- Main emit_c: walks the full AST, emits modules, then current unit, and wraps with runtime+main.
@@ -4535,16 +5055,18 @@ fun emit_c(ast = any, runtime_src = string, src_dir = string) (( string )) {
   n = stdr.len(decls)
   let ?i = 0
   let ?has_entry = false
-  let ?has_cogito = false
+  let ?ext_module_name = ""
   let brings = collect_brings(decls, src_dir)
   let nb = stdr.len(brings)
+  g_bring_names = []: [string => any]
   let ?bi = 0
   for (; bi < nb; bi = bi + 1) {
     let binfo = brings[bi]
     let bname = binfo[0] ?? ""
     let bdir = binfo[1] ?? ""
-    if bname == "cogito" {
-      has_cogito = true
+    g_bring_names[bname] = true
+    if stdr.len(ext_module_name) == 0 && is_external_module(bname) {
+      ext_module_name = bname
     }
     -- Parse and build class info for this module
     let mod_fpath = resolve_bring(bname, bdir)
@@ -4565,28 +5087,16 @@ fun emit_c(ast = any, runtime_src = string, src_dir = string) (( string )) {
   -- Build class info for main unit too
   build_class_info(decls, "")
 
-  -- Include cogito bindings if needed
-  if has_cogito {
-    let ?cog_path = ""
-    if file_exists("src/yis/cogito_bindings.inc") == 0 { cog_path = "src/yis/cogito_bindings.inc" }
-    elif file_exists("../src/yis/cogito_bindings.inc") == 0 { cog_path = "../src/yis/cogito_bindings.inc" }
-    elif file_exists("../../src/yis/cogito_bindings.inc") == 0 { cog_path = "../../src/yis/cogito_bindings.inc" }
-    elif file_exists("Cogito/src/yis/cogito_bindings.inc") == 0 { cog_path = "Cogito/src/yis/cogito_bindings.inc" }
-    if file_exists("../Cogito/yis/cogito_bindings.inc") == 0 { cog_path = "../Cogito/yis/cogito_bindings.inc" }
-    elif file_exists("../Cogito/src/yis/cogito_bindings.inc") == 0 { cog_path = "../Cogito/src/yis/cogito_bindings.inc" }
-    elif file_exists("../../Cogito/yis/cogito_bindings.inc") == 0 { cog_path = "../../Cogito/yis/cogito_bindings.inc" }
-    elif file_exists("../../Cogito/src/yis/cogito_bindings.inc") == 0 { cog_path = "../../Cogito/src/yis/cogito_bindings.inc" }
-    elif file_exists("../cogito/yis/cogito_bindings.inc") == 0 { cog_path = "../cogito/yis/cogito_bindings.inc" }
-    elif file_exists("../cogito/src/yis/cogito_bindings.inc") == 0 { cog_path = "../cogito/src/yis/cogito_bindings.inc" }
-    elif file_exists("../../cogito/yis/cogito_bindings.inc") == 0 { cog_path = "../../cogito/yis/cogito_bindings.inc" }
-    elif file_exists("../../cogito/src/yis/cogito_bindings.inc") == 0 { cog_path = "../../cogito/src/yis/cogito_bindings.inc" }
-    elif file_exists("src/bootstrap/cogito_bindings.inc") == 0 { cog_path = "src/bootstrap/cogito_bindings.inc" }
-    elif file_exists("src/cogito_bindings.inc") == 0 { cog_path = "src/cogito_bindings.inc" }
-    if cog_path != "" {
-      let cog_src = stdr.read_text_file(cog_path)
-      if !stdr.is_null(cog_src) {
-        stdr.push(p, "\n/* cogito bindings */\n")
-        stdr.push(p, cog_src)
+  -- Include external module bindings if needed
+  if stdr.len(ext_module_name) > 0 {
+    let bind_path = find_ext_module_bindings(ext_module_name)
+    if stdr.len(bind_path) > 0 {
+      let bind_src = stdr.read_text_file(bind_path)
+      if !stdr.is_null(bind_src) {
+        stdr.push(p, "\n/* ")
+        stdr.push(p, ext_module_name)
+        stdr.push(p, " bindings */\n")
+        stdr.push(p, bind_src)
         stdr.push(p, "\n")
       }
     }
@@ -4704,6 +5214,7 @@ entry() (( -- )) {
     let tail = stdr.slice(entry_path, ep_len - 11, ep_len)
     if tail == "src/init.yi" { is_self_host = true }
   }
+
   let source_raw = stdr.read_text_file(entry_path)
   if stdr.is_null(source_raw) {
     stdr.write("ERR: Cannot read file\n")
@@ -4711,10 +5222,59 @@ entry() (( -- )) {
   }
 
   let ?fallback_cleanup_c = ""
+  let ?detected_ext_module = ""
   if is_run_mode {
-    if str_find(source_raw, "bring cogito") >= 0 {
-      fallback_cleanup_c = cogito_run_c_artifact(entry_path, source_raw)
+    -- Quick text scan for bring statements that might reference external modules
+    let known_ext = ["cogito"]
+    let ?ki = 0
+    let kn = stdr.len(known_ext)
+    for (; ki < kn; ki = ki + 1) {
+      let km = known_ext[ki] ?? ""
+      if str_find(source_raw, stdr.str_concat("bring ", km)) >= 0 {
+        detected_ext_module = km
+        break
+      }
     }
+  }
+
+  -- Early cache check for run mode: skip all parsing if binary is fresh
+  if is_run_mode && !is_self_host {
+    let manifest = run_manifest_path(entry_path, source_raw, detected_ext_module)
+    let cached_out = check_manifest_freshness(manifest)
+    if stdr.len(cached_out) > 0 {
+      -- Binary is fresh according to manifest — run directly
+      let cwd = stdr.getcwd()
+      let ?run_cmd = "\""
+      run_cmd = stdr.str_concat(run_cmd, cwd)
+      run_cmd = stdr.str_concat(run_cmd, "/")
+      run_cmd = stdr.str_concat(run_cmd, cached_out)
+      run_cmd = stdr.str_concat(run_cmd, "\"")
+      let ?ri = run_arg_start
+      let rn = stdr.len(argv)
+      for (; ri < rn; ri = ri + 1) {
+        let a = argv[ri] ?? ""
+        run_cmd = stdr.str_concat(run_cmd, " \"")
+        run_cmd = stdr.str_concat(run_cmd, a)
+        run_cmd = stdr.str_concat(run_cmd, "\"")
+      }
+      let run_dir = dir_of(entry_path)
+      if stdr.len(run_dir) > 0 {
+        let ?pref = "cd \""
+        pref = stdr.str_concat(pref, run_dir)
+        pref = stdr.str_concat(pref, "\" && ")
+        run_cmd = stdr.str_concat(pref, run_cmd)
+      }
+      run_cmd = stdr.str_concat(run_cmd, " 2>&1")
+      let run_res = stdr.run_command(run_cmd)
+      let run_out = run_res[1] ?? ""
+      if stdr.len(run_out) > 0 { stdr.write(run_out ?? "") }
+      return
+    }
+  }
+
+  -- Only compute fallback C artifact path when we actually need to compile
+  if stdr.len(detected_ext_module) > 0 {
+    fallback_cleanup_c = ext_module_run_c_artifact(entry_path, source_raw)
   }
 
   let disable_boot_fallback = env_nonempty("YIS_DISABLE_BOOTSTRAP_FALLBACK")
@@ -4750,8 +5310,6 @@ entry() (( -- )) {
   if !is_self_host {
     source = preprocess_source(source_raw)
   }
-  -- Read runtime for embedding in generated C
-  let runtime_src = find_runtime_src(argv)
 
   let toks = lexer.lex_with_escapes(source, should_decode_escapes(entry_path))
   let ast = parser.parse(toks)
@@ -4764,8 +5322,9 @@ entry() (( -- )) {
     opt_ast = optimize_program(ast)
   }
 
-  -- Detect cogito usage by scanning AST for 'bring cogito'
-  let ?uses_cogito = false
+  -- Detect external module usage by scanning AST for 'bring <ext_module>'
+  let ?ext_mod_name = ""
+  let ?uses_ext_module = false
   let decls_key2 = "decls"
   let ast_decls2 = opt_ast[decls_key2] ?? []: [any]
   let ?di = 0
@@ -4773,7 +5332,11 @@ entry() (( -- )) {
   for (; di < dn; di = di + 1) {
     let d2 = ast_decls2[di]
     if d2["tag"] == "bring" {
-      if d2["name"] == "cogito" { uses_cogito = true }
+      let bname2 = d2["name"] ?? ""
+      if stdr.len(ext_mod_name) == 0 && is_external_module(bname2) {
+        ext_mod_name = bname2
+        uses_ext_module = true
+      }
     }
   }
 
@@ -4786,19 +5349,33 @@ entry() (( -- )) {
 
   let ?app_name = sanitize_filename_component(stem_name(entry_path))
   if stdr.len(app_name) == 0 { app_name = "main" }
-  if uses_cogito {
-    let appid_name = find_cogito_appid_name(opt_ast)
+  if uses_ext_module {
+    let appid_name = find_appid_name(opt_ast)
     if stdr.len(appid_name) > 0 {
       app_name = appid_name
     }
   }
 
   let ?c_path = stdr.str_concat(app_name, ".c")
+  if is_self_host {
+    if is_run_mode {
+      c_path = ".yi_run_compile_out.c"
+    } else {
+      c_path = ".yi_compile_out.c"
+    }
+  }
 
   let ?out_path = app_name
+  if is_self_host {
+    if is_run_mode {
+      out_path = ".yi_run_out"
+    } else {
+      out_path = ".yi_out"
+    }
+  }
   let ?bundle_dir = ""
   let ?macos_bundle_id = ""
-  if uses_cogito && is_macos {
+  if uses_ext_module && is_macos {
     bundle_dir = stdr.str_concat(app_name, ".app")
     out_path = stdr.str_concat(bundle_dir, "/Contents/MacOS/")
     out_path = stdr.str_concat(out_path, app_name)
@@ -4810,7 +5387,6 @@ entry() (( -- )) {
   }
 
   let src_dir = dir_of(entry_path)
-  let c_src_str = stdr.str(emit_c(opt_ast, runtime_src, src_dir))
   let ?need_compile = true
   let ?stale_out = false
   if is_run_mode {
@@ -4843,103 +5419,93 @@ entry() (( -- )) {
     rm_cmd = stdr.str_concat(rm_cmd, out_path)
     rm_cmd = stdr.str_concat(rm_cmd, "\"")
     stdr.run_command(rm_cmd)
-    if uses_cogito && is_macos && stdr.len(bundle_dir) > 0 {
+    if uses_ext_module && is_macos && stdr.len(bundle_dir) > 0 {
       rm_tree_quiet(bundle_dir)
     }
   }
 
   if need_compile {
+    -- Read runtime for embedding in generated C (only when compiling)
+    let runtime_src = find_runtime_src(argv)
+    let c_src_str = stdr.str(emit_c(opt_ast, runtime_src, src_dir))
     let ok = stdr.write_text_file(c_path, c_src_str)
     if !ok {
       stdr.write("ERR: Cannot write C output\n")
       return
     }
   }
-  -- Build cc command with cogito flags if needed
-  -- Append stderr redirection so stdr.run_command captures compiler errors
-  let ?cc_opt_flags = "-O3 -march=native"
-  if is_run_mode { cc_opt_flags = "-O0" }
-  let ?cc_cmd = "cc -o \""
-  cc_cmd = stdr.str_concat(cc_cmd, out_path)
-  cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
-  cc_cmd = stdr.str_concat(cc_cmd, c_path)
-  cc_cmd = stdr.str_concat(cc_cmd, "\" ")
-  cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
-  cc_cmd = stdr.str_concat(cc_cmd, " -lm 2>&1")
-  if uses_cogito {
-    -- Prefer installed Cogito include/lib paths so generated binaries are not
-    -- tied to repo-relative build directories.
-    let ?cog_cflags = ""
-    let ?cog_ldflags = "-lcogito"
-    let hp1 = stdr.run_command("test -f /opt/homebrew/include/cogito/cogito.h && echo y")
-    let hp1c = hp1[0] ?? 1
-    let hp2 = stdr.run_command("test -f /usr/local/include/cogito/cogito.h && echo y")
-    let hp2c = hp2[0] ?? 1
-    let hp3 = stdr.run_command("test -f /usr/include/cogito/cogito.h && echo y")
-    let hp3c = hp3[0] ?? 1
-    let p1 = stdr.run_command("test -f ../cogito/src/src/cogito.h && echo y")
-    let p1c = p1[0] ?? 1
-    let p2 = stdr.run_command("test -f ../cogito/src/cogito.h && echo y")
-    let p2c = p2[0] ?? 1
-    let p3 = stdr.run_command("test -f ../../cogito/src/src/cogito.h && echo y")
-    let p3c = p3[0] ?? 1
-    let p4 = stdr.run_command("test -f ../../cogito/src/cogito.h && echo y")
-    let p4c = p4[0] ?? 1
-    if hp1c == 0 { cog_cflags = "-I/opt/homebrew/include/cogito" }
-    elif hp2c == 0 { cog_cflags = "-I/usr/local/include/cogito" }
-    elif hp3c == 0 { cog_cflags = "-I/usr/include/cogito" }
-    elif p1c == 0 { cog_cflags = "-I../cogito/src/src" }
-    elif p2c == 0 { cog_cflags = "-I../cogito/src" }
-    elif p3c == 0 { cog_cflags = "-I../../cogito/src/src" }
-    elif p4c == 0 { cog_cflags = "-I../../cogito/src" }
-    -- Probe for libcogito.dylib and bake absolute runtime path into the output binary.
-    let lsys1 = stdr.run_command("test -f /opt/homebrew/lib/libcogito.dylib && cd /opt/homebrew/lib && pwd")
-    let lsys1c = lsys1[0] ?? 1
-    let lsys2 = stdr.run_command("test -f /usr/local/lib/libcogito.dylib && cd /usr/local/lib && pwd")
-    let lsys2c = lsys2[0] ?? 1
-    let lsys3 = stdr.run_command("test -f /usr/lib/libcogito.dylib && cd /usr/lib && pwd")
-    let lsys3c = lsys3[0] ?? 1
-    let l1 = stdr.run_command("test -f ../cogito/build/libcogito.dylib && cd ../cogito/build && pwd")
-    let l1c = l1[0] ?? 1
-    let l2 = stdr.run_command("test -f ../cogito/_build/libcogito.dylib && cd ../cogito/_build && pwd")
-    let l2c = l2[0] ?? 1
-    let l3 = stdr.run_command("test -f ../../cogito/build/libcogito.dylib && cd ../../cogito/build && pwd")
-    let l3c = l3[0] ?? 1
-    let l4 = stdr.run_command("test -f ../../cogito/_build/libcogito.dylib && cd ../../cogito/_build && pwd")
-    let l4c = l4[0] ?? 1
-    let ?lib_dir = ""
-    let ?lib_abs = ""
-    if lsys1c == 0 { lib_dir = "/opt/homebrew/lib"; lib_abs = lsys1[1] ?? "" }
-    elif lsys2c == 0 { lib_dir = "/usr/local/lib"; lib_abs = lsys2[1] ?? "" }
-    elif lsys3c == 0 { lib_dir = "/usr/lib"; lib_abs = lsys3[1] ?? "" }
-    elif l1c == 0 { lib_dir = "../cogito/build"; lib_abs = l1[1] ?? "" }
-    elif l2c == 0 { lib_dir = "../cogito/_build"; lib_abs = l2[1] ?? "" }
-    elif l3c == 0 { lib_dir = "../../cogito/build"; lib_abs = l3[1] ?? "" }
-    elif l4c == 0 { lib_dir = "../../cogito/_build"; lib_abs = l4[1] ?? "" }
-    if stdr.len(lib_abs) > 0 {
-      -- Trim trailing newline from pwd output
-      let la = stdr.len(lib_abs)
-      if stdr.slice(lib_abs, la - 1, la) == "\n" {
-        lib_abs = stdr.slice(lib_abs, 0, la - 1)
-      }
-      cog_ldflags = stdr.str_concat("-L", lib_dir)
-      cog_ldflags = stdr.str_concat(cog_ldflags, " -lcogito -Wl,-rpath,")
-      cog_ldflags = stdr.str_concat(cog_ldflags, lib_abs)
-    }
-    cc_cmd = "cc -o \""
+  if need_compile {
+    -- Build cc command with external module flags if needed
+    -- Append stderr redirection so stdr.run_command captures compiler errors
+    let ?cc_opt_flags = "-Os -march=native"
+    if is_run_mode { cc_opt_flags = "-O0" }
+    let ?cc_cmd = "cc -o \""
     cc_cmd = stdr.str_concat(cc_cmd, out_path)
     cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
     cc_cmd = stdr.str_concat(cc_cmd, c_path)
     cc_cmd = stdr.str_concat(cc_cmd, "\" ")
     cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
-    cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
-    cc_cmd = stdr.str_concat(cc_cmd, cog_cflags)
-    cc_cmd = stdr.str_concat(cc_cmd, " ")
-    cc_cmd = stdr.str_concat(cc_cmd, cog_ldflags)
-    cc_cmd = stdr.str_concat(cc_cmd, " 2>&1")
-  }
-  if need_compile {
-    if uses_cogito && is_macos {
+    cc_cmd = stdr.str_concat(cc_cmd, " -lm 2>&1")
+    if uses_ext_module {
+      let ?mod_cflags = ""
+      let ?mod_ldflags = ""
+      -- Check env var YIS_<NAME>_CFLAGS first
+      let upper_mod = str_to_upper(ext_mod_name)
+      let cflags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_CFLAGS")
+      let cflags_val = _env_value(cflags_env)
+      if stdr.len(cflags_val) > 0 {
+        mod_cflags = cflags_val
+      } else {
+        -- Auto-detect include path
+        mod_cflags = detect_module_cflags(ext_mod_name)
+      }
+      -- Check env var YIS_<NAME>_FLAGS first
+      let flags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_FLAGS")
+      let flags_val = _env_value(flags_env)
+      if stdr.len(flags_val) > 0 {
+        mod_ldflags = flags_val
+      } else {
+        -- Auto-detect library path
+        mod_ldflags = detect_module_ldflags(ext_mod_name)
+      }
+      -- Also add raylib flags for modules that need it
+      let ?ray_cflags = ""
+      let ?ray_ldflags = ""
+      let ray_cf_env = _env_value("YIS_RAYLIB_CFLAGS")
+      if stdr.len(ray_cf_env) > 0 { ray_cflags = ray_cf_env }
+      let ray_fl_env = _env_value("YIS_RAYLIB_FLAGS")
+      if stdr.len(ray_fl_env) > 0 { ray_ldflags = ray_fl_env }
+      elif is_macos {
+        -- Default raylib flags on macOS
+        let rl1 = stdr.run_command("test -f /opt/homebrew/lib/libraylib.a && echo y")
+        if rl1[0] == 0 { ray_ldflags = "-L/opt/homebrew/lib -lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo" }
+      }
+      cc_cmd = "cc -o \""
+      cc_cmd = stdr.str_concat(cc_cmd, out_path)
+      cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
+      cc_cmd = stdr.str_concat(cc_cmd, c_path)
+      cc_cmd = stdr.str_concat(cc_cmd, "\" ")
+      cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
+      cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
+      if stdr.len(mod_cflags) > 0 {
+        cc_cmd = stdr.str_concat(cc_cmd, mod_cflags)
+        cc_cmd = stdr.str_concat(cc_cmd, " ")
+      }
+      if stdr.len(ray_cflags) > 0 {
+        cc_cmd = stdr.str_concat(cc_cmd, ray_cflags)
+        cc_cmd = stdr.str_concat(cc_cmd, " ")
+      }
+      if stdr.len(mod_ldflags) > 0 {
+        cc_cmd = stdr.str_concat(cc_cmd, mod_ldflags)
+        cc_cmd = stdr.str_concat(cc_cmd, " ")
+      }
+      if stdr.len(ray_ldflags) > 0 {
+        cc_cmd = stdr.str_concat(cc_cmd, ray_ldflags)
+        cc_cmd = stdr.str_concat(cc_cmd, " ")
+      }
+      cc_cmd = stdr.str_concat(cc_cmd, " 2>&1")
+    }
+    if uses_ext_module && is_macos {
       if !prepare_macos_app_bundle(out_path, macos_bundle_id, app_name) {
         stdr.write("ERR: failed to prepare macOS app bundle\n")
         return
@@ -4955,15 +5521,21 @@ entry() (( -- )) {
       stdr.write("\n")
       return
     }
+
+    -- Write run manifest for early cache on next run
+    if is_run_mode {
+      let manifest = run_manifest_path(entry_path, source_raw, detected_ext_module)
+      let ?ext_yi_path = ""
+      if stdr.len(ext_mod_name) > 0 {
+        ext_yi_path = resolve_bring(ext_mod_name, src_dir)
+      }
+      let ?compiler_p = argv[0] ?? ""
+      write_run_manifest(manifest, out_path, entry_path, ext_yi_path, compiler_p)
+    }
   }
 
   if is_run_mode {
-    let pwd_res = stdr.run_command("pwd")
-    let ?cwd = pwd_res[1] ?? ""
-    let cwd_n = stdr.len(cwd)
-    if cwd_n > 0 && stdr.slice(cwd, cwd_n - 1, cwd_n) == "\n" {
-      cwd = stdr.slice(cwd, 0, cwd_n - 1)
-    }
+    let cwd = stdr.getcwd()
 
     let ?run_cmd = "\""
     run_cmd = stdr.str_concat(run_cmd, cwd)
@@ -4995,7 +5567,7 @@ entry() (( -- )) {
     if stdr.len(run_out) > 0 {
       stdr.write(run_out ?? "")
     }
-    if uses_cogito {
+    if uses_ext_module {
       rm_file_quiet(c_path)
     }
     if run_code != 0 {

@@ -17,9 +17,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <io.h>
-#else
-int isatty(int);
-int fileno(FILE*);
+#include <unistd.h>
 #endif
 
 static int yis_stdout_isatty = 0;
@@ -388,6 +386,33 @@ static YisVal stdr_run_command(YisVal cmdv) {
   yis_arr_add(out, YV_INT(status));
   yis_arr_add(out, YV_STR(out_str));
   return YV_ARR(out);
+}
+
+static YisVal stdr_file_exists(YisVal pathv) {
+  if (pathv.tag != EVT_STR) yis_trap("file_exists expects string");
+  YisStr* s = (YisStr*)pathv.as.p;
+  struct stat st;
+  return YV_BOOL(stat(s->data, &st) == 0 && S_ISREG(st.st_mode));
+}
+
+static YisVal stdr_file_mtime(YisVal pathv) {
+  if (pathv.tag != EVT_STR) yis_trap("file_mtime expects string");
+  YisStr* s = (YisStr*)pathv.as.p;
+  struct stat st;
+  if (stat(s->data, &st) != 0) return YV_INT(-1);
+#if defined(__APPLE__)
+  return YV_INT((int64_t)st.st_mtimespec.tv_sec);
+#elif defined(_WIN32)
+  return YV_INT((int64_t)st.st_mtime);
+#else
+  return YV_INT((int64_t)st.st_mtim.tv_sec);
+#endif
+}
+
+static YisVal stdr_getcwd(void) {
+  char buf[4096];
+  if (getcwd(buf, sizeof(buf))) return YV_STR(stdr_str_from_slice(buf, strlen(buf)));
+  return YV_STR(stdr_str_from_slice("", 0));
 }
 
 static YisVal stdr_capture_shell_first_line(const char* cmd) {
@@ -956,6 +981,7 @@ static void yis_dict_set(YisDict* d, YisVal key, YisVal val) {
   YisStr* k = (YisStr*)key.as.p;
   for (size_t i = 0; i < d->len; i++) {
     if (yis_str_cmp(d->entries[i].key, k) == 0) {
+      yis_retain_val(val);
       yis_release_val(d->entries[i].val);
       d->entries[i].val = val;
       return;

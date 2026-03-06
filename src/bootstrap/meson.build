@@ -16,6 +16,7 @@ yis_c_sources = files(
   'arena.c',
   'str.c',
   'diag.c',
+  'external_module.c',
 )
 
 yis_c_includes = include_directories('.')
