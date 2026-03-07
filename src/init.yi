@@ -26,6 +26,7 @@ def ?g_bring_names = []: [string => any]
 def ?g_lambda_meta = []: [string => any]
 def ?g_lambda_ids = []: [any]
 def ?g_next_lambda_id = 1
+def ?g_src_dir = ""
 
 -- ============================================================
 -- C code emitter: walks AST and produces C using the Yis runtime.
@@ -1638,6 +1639,24 @@ def ?g_next_lambda_id = 1
     }
 
     if is_external_module(obj_name) {
+      -- Embed SUM stylesheet at compile time for load_sum("literal")
+      if field == "load_sum" && stdr.len(args) == 1 {
+        let sum_arg = args[0]
+        let sat = sum_arg["tag"] ?? ""
+        if sat == "str" {
+          let sum_rel = sum_arg["value"] ?? ""
+          if stdr.len(sum_rel) > 0 {
+            let sum_path = stdr.str_concat(g_src_dir, sum_rel)
+            let sum_src = stdr.read_text_file(sum_path)
+            if !stdr.is_null(sum_src) && stdr.len(sum_src) > 0 {
+              let ?r = "cogito_load_sum_inline("
+              r = stdr.str_concat(r, _c_quote(sum_src))
+              r = stdr.str_concat(r, ")")
+              return r
+            }
+          }
+        }
+      }
       let ?r = mangle_name(obj_name, field)
       r = stdr.str_concat(r, "(")
       r = emit_args(args, r, cask_name)
@@ -5005,6 +5024,7 @@ def ?g_next_lambda_id = 1
   if stdr.is_null(decls) { return "int main(void) { return 0; }\n" }
 
   g_next_lambda_id = 1
+  g_src_dir = src_dir
 
   let ?p = []: [any]
   if stdr.len(runtime_src) > 0 {

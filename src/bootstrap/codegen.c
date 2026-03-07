@@ -2301,6 +2301,40 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         out->tmp = t;
                         return true;
                     }
+                    // Embed SUM file contents at compile time for cogito.load_sum("literal.sum")
+                    // so the stylesheet is baked into the binary and works regardless of CWD.
+                    if (cg->uses_cogito && cg->ext_module_name &&
+                        str_eq_c(name, "load_sum") && e->as.call.args_len == 1) {
+                        Expr *arg0 = e->as.call.args[0];
+                        if (arg0 && arg0->kind == EXPR_STR && arg0->as.str_lit.parts &&
+                            arg0->as.str_lit.parts->len == 1 && arg0->as.str_lit.parts->parts[0].kind == STR_PART_TEXT) {
+                            Str lit = arg0->as.str_lit.parts->parts[0].as.text;
+                            if (lit.len > 0) {
+                                // Resolve relative to the calling source file's directory
+                                char *src_path = arena_strndup(cg->arena, path.data, path.len);
+                                char *src_dir = path_dirname(src_path);
+                                char *sum_path = path_join(src_dir ? src_dir : ".", arena_strndup(cg->arena, lit.data, lit.len));
+                                free(src_dir);
+                                if (sum_path) {
+                                    size_t sum_len = 0;
+                                    char *sum_src = read_file_arena(sum_path, cg->arena, &sum_len, NULL);
+                                    free(sum_path);
+                                    if (sum_src && sum_len > 0) {
+                                        char *esc = c_escape(cg->arena, (Str){sum_src, sum_len});
+                                        if (esc) {
+                                            w_line(&cg->w, "%s_load_sum_inline(\"%s\");", cg->ext_module_name, esc);
+                                            char *t = codegen_new_tmp(cg);
+                                            w_line(&cg->w, "YisVal %s = YV_NULLV;", t);
+                                            gen_expr_add(out, t);
+                                            out->tmp = t;
+                                            return true;
+                                        }
+                                    }
+                                }
+                                // Fall through to runtime load_sum if file not found at compile time
+                            }
+                        }
+                    }
                     FunSig *sig = codegen_fun_sig(cg, mod, name);
                     if (!sig) {
                         return cg_set_errf(err, path, e->line, e->col, "unknown %.*s.%.*s", (int)mod.len, mod.data, (int)name.len, name.data);
