@@ -23,16 +23,7 @@ int fileno(FILE*);
 
 static int yis_stdout_isatty = 0;
 
-static bool cogito_debug_enabled(void);
-static const char* cogito_font_path_active = NULL;
-
 static void yis_runtime_init(void) {
-#if defined(__APPLE__)
-  if (cogito_debug_enabled()) {
-    fprintf(stderr, "cogito: runtime_init\n");
-    fflush(stderr);
-  }
-#endif
 #if defined(_WIN32)
   yis_stdout_isatty = _isatty(_fileno(stdout));
 #else

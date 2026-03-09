@@ -11,7 +11,6 @@
 // --- helpers ---
 
 // Build the upper-cased env var name: YIS_{NAME}_{suffix}
-// e.g. name="cogito", suffix="PATH" => "YIS_COGITO_PATH"
 static const char *module_env(const char *name, const char *suffix) {
     static char env_buf[256];
     size_t nlen = strlen(name);
@@ -290,6 +289,125 @@ char *find_module_bindings(const char *name, const char *module_yi_path) {
     return NULL;
 }
 
+char *find_module_packager(const char *name, const char *module_yi_path) {
+    if (!name || !name[0]) return NULL;
+
+    char script_name[256];
+    size_t nlen = strlen(name);
+    if (nlen + 13 >= sizeof(script_name)) return NULL;
+    snprintf(script_name, sizeof(script_name), "%s_packager.sh", name);
+
+    char *result = NULL;
+
+    const char *env = get_module_env(name, "PACKAGER");
+    if (env) {
+        if (path_is_file(env)) return strdup(env);
+    }
+
+    if (module_yi_path && module_yi_path[0]) {
+        char *mod_dir = path_dirname(module_yi_path);
+        if (mod_dir) {
+            char *yis_dir = path_join(mod_dir, "yis");
+            if (yis_dir) {
+                result = path_join(yis_dir, script_name);
+                free(yis_dir);
+                if (result && path_is_file(result)) {
+                    free(mod_dir);
+                    return result;
+                }
+                free(result);
+                result = NULL;
+            }
+            result = path_join(mod_dir, script_name);
+            if (result && path_is_file(result)) {
+                free(mod_dir);
+                return result;
+            }
+            free(result);
+            free(mod_dir);
+            result = NULL;
+        }
+    }
+
+    {
+        char sys_path[512];
+        const char *sys_dirs[] = {
+#if defined(__APPLE__)
+            "/opt/homebrew/share/yis",
+            "/usr/local/share/yis",
+#endif
+            "/usr/share/yis",
+        };
+        for (size_t i = 0; i < sizeof(sys_dirs) / sizeof(sys_dirs[0]); i++) {
+            snprintf(sys_path, sizeof(sys_path), "%s/%s/%s", sys_dirs[i], name, script_name);
+            if (path_is_file(sys_path)) {
+                return strdup(sys_path);
+            }
+        }
+    }
+
+    {
+        char pat[512];
+        const char *patterns[] = {
+            "src/yis/%s",
+            "../src/yis/%s",
+            "../../src/yis/%s",
+            "%s/src/yis/%s",
+            "%s/yis/%s",
+            "../%s/src/yis/%s",
+            "../%s/yis/%s",
+            "../../%s/src/yis/%s",
+            "../../%s/yis/%s",
+        };
+        for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
+            if (i < 3) {
+                snprintf(pat, sizeof(pat), patterns[i], script_name);
+            } else {
+                snprintf(pat, sizeof(pat), patterns[i], name, script_name);
+            }
+            if (path_is_file(pat)) {
+                return strdup(pat);
+            }
+        }
+    }
+
+    {
+        char *exe_dir = yis_exe_dir();
+        if (exe_dir) {
+            char rel[512];
+
+            snprintf(rel, sizeof(rel), "../share/yis/%s/%s", name, script_name);
+            result = path_join(exe_dir, rel);
+            if (result && path_is_file(result)) {
+                free(exe_dir);
+                return result;
+            }
+            free(result);
+            result = NULL;
+
+            snprintf(rel, sizeof(rel), "../../share/yis/%s/%s", name, script_name);
+            result = path_join(exe_dir, rel);
+            if (result && path_is_file(result)) {
+                free(exe_dir);
+                return result;
+            }
+            free(result);
+            result = NULL;
+
+            snprintf(rel, sizeof(rel), "../Resources/share/yis/%s/%s", name, script_name);
+            result = path_join(exe_dir, rel);
+            if (result && path_is_file(result)) {
+                free(exe_dir);
+                return result;
+            }
+            free(result);
+            free(exe_dir);
+        }
+    }
+
+    return NULL;
+}
+
 // --- program_uses_module ---
 
 static bool import_name_matches(Str sname, const char *name) {
@@ -331,6 +449,40 @@ bool program_uses_module(Program *prog, const char *name) {
         for (size_t j = 0; j < m->imports_len; j++) {
             if (m->imports[j] && import_name_matches(m->imports[j]->name, name))
                 return true;
+        }
+    }
+    return false;
+}
+
+static bool module_name_is_stdlib(const char *name) {
+    if (!name) return false;
+    return strcmp(name, "stdr") == 0 ||
+           strcmp(name, "math") == 0 ||
+           strcmp(name, "net") == 0 ||
+           strcmp(name, "json") == 0;
+}
+
+bool program_find_first_external_module(Program *prog, const char *stdlib_dir,
+                                       char *out, size_t out_cap) {
+    if (!prog || !out || out_cap == 0) return false;
+    out[0] = '\0';
+    for (size_t i = 0; i < prog->mods_len; i++) {
+        Module *m = prog->mods[i];
+        if (!m) continue;
+        for (size_t j = 0; j < m->imports_len; j++) {
+            Import *imp = m->imports[j];
+            if (!imp || !imp->name.data || imp->name.len == 0) continue;
+            char mod_name[256];
+            if (imp->name.len >= sizeof(mod_name)) continue;
+            memcpy(mod_name, imp->name.data, imp->name.len);
+            mod_name[imp->name.len] = '\0';
+            if (module_name_is_stdlib(mod_name)) continue;
+            char *resolved = resolve_external_module(mod_name, stdlib_dir);
+            if (resolved) {
+                snprintf(out, out_cap, "%s", mod_name);
+                free(resolved);
+                return true;
+            }
         }
     }
     return false;

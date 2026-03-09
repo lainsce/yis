@@ -1639,24 +1639,6 @@ def ?g_src_dir = ""
     }
 
     if is_external_module(obj_name) {
-      -- Embed SUM stylesheet at compile time for load_sum("literal")
-      if field == "load_sum" && stdr.len(args) == 1 {
-        let sum_arg = args[0]
-        let sat = sum_arg["tag"] ?? ""
-        if sat == "str" {
-          let sum_rel = sum_arg["value"] ?? ""
-          if stdr.len(sum_rel) > 0 {
-            let sum_path = stdr.str_concat(g_src_dir, sum_rel)
-            let sum_src = stdr.read_text_file(sum_path)
-            if !stdr.is_null(sum_src) && stdr.len(sum_src) > 0 {
-              let ?r = "cogito_load_sum_inline("
-              r = stdr.str_concat(r, _c_quote(sum_src))
-              r = stdr.str_concat(r, ")")
-              return r
-            }
-          }
-        }
-      }
       let ?r = mangle_name(obj_name, field)
       r = stdr.str_concat(r, "(")
       r = emit_args(args, r, cask_name)
@@ -3054,6 +3036,24 @@ def ?g_src_dir = ""
   return s
 }
 
+: detect_first_external_module_from_source(entry_path = string, source_raw = string) (( string )) {
+  let source = preprocess_source(source_raw)
+  let toks = lexer.lex_with_escapes(source, should_decode_escapes(entry_path))
+  let ast = parser.parse(toks)
+  if stdr.is_null(ast) { return "" }
+  let decls = ast["decls"] ?? []: [any]
+  let ?i = 0
+  let n = stdr.len(decls)
+  for (; i < n; i = i + 1) {
+    let d = decls[i]
+    if d["tag"] == "bring" {
+      let name = d["name"] ?? ""
+      if is_external_module(name) { return name }
+    }
+  }
+  return ""
+}
+
 : shell_quote_arg(arg = string) (( string )) {
   let ?q = "\""
   let n = stdr.len(arg)
@@ -3312,7 +3312,7 @@ def ?g_src_dir = ""
       }
     } elif ftag == "ident" {
       let fname = fn["name"] ?? ""
-      if fname == "__cogito_app_set_appid" && stdr.len(args) > 1 {
+      if stdr.len(fname) > 14 && stdr.slice(fname, stdr.len(fname) - 14, stdr.len(fname)) == "_app_set_appid" && stdr.len(args) > 1 {
         let cand = expr_string_literal_as_filename(args[1])
         if stdr.len(cand) > 0 { out = cand }
       }
@@ -3494,6 +3494,71 @@ def ?g_src_dir = ""
     }
   }
   return out
+}
+
+: find_ext_module_packager(mod_name = string, module_yi_path = string) (( string )) {
+  if stdr.len(mod_name) == 0 { return "" }
+  let upper = str_to_upper(mod_name)
+  let env_name = stdr.str_concat(stdr.str_concat("YIS_", upper), "_PACKAGER")
+  let env_val = _env_value(env_name)
+  if stdr.len(env_val) > 0 && file_exists(env_val) == 0 { return env_val }
+
+  let script = stdr.str_concat(mod_name, "_packager.sh")
+  let ?p = ""
+  if stdr.len(module_yi_path) > 0 {
+    let mod_dir = dir_of(module_yi_path)
+    p = stdr.str_concat(mod_dir, stdr.str_concat("yis/", script))
+    if file_exists(p) == 0 { return p }
+    p = stdr.str_concat(mod_dir, script)
+    if file_exists(p) == 0 { return p }
+  }
+
+  p = stdr.str_concat(stdr.str_concat("/opt/homebrew/share/yis/", mod_name), stdr.str_concat("/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("/usr/local/share/yis/", mod_name), stdr.str_concat("/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("/usr/share/yis/", mod_name), stdr.str_concat("/", script))
+  if file_exists(p) == 0 { return p }
+
+  p = stdr.str_concat("src/yis/", script)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat("../src/yis/", script)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat("../../src/yis/", script)
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../", mod_name), stdr.str_concat("/src/yis/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", mod_name), stdr.str_concat("/src/yis/", script))
+  if file_exists(p) == 0 { return p }
+
+  let cap_name = stdr.str_concat(str_to_upper(stdr.slice(mod_name, 0, 1)), stdr.slice(mod_name, 1, stdr.len(mod_name)))
+  p = stdr.str_concat(stdr.str_concat("../", cap_name), stdr.str_concat("/src/yis/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", cap_name), stdr.str_concat("/src/yis/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../", cap_name), stdr.str_concat("/yis/", script))
+  if file_exists(p) == 0 { return p }
+  p = stdr.str_concat(stdr.str_concat("../../", cap_name), stdr.str_concat("/yis/", script))
+  if file_exists(p) == 0 { return p }
+  return ""
+}
+
+: run_ext_module_packager(packager_path = string, entry_path = string, out_path = string, app_name = string) (( bool )) {
+  if stdr.len(packager_path) == 0 { return true }
+  let ?cmd = "sh "
+  cmd = stdr.str_concat(cmd, shell_quote_arg(packager_path))
+  cmd = stdr.str_concat(cmd, " ")
+  cmd = stdr.str_concat(cmd, shell_quote_arg(entry_path))
+  cmd = stdr.str_concat(cmd, " ")
+  cmd = stdr.str_concat(cmd, shell_quote_arg(out_path))
+  cmd = stdr.str_concat(cmd, " ")
+  cmd = stdr.str_concat(cmd, shell_quote_arg(app_name))
+  cmd = stdr.str_concat(cmd, " 2>&1")
+  let res = stdr.run_command(cmd)
+  let code = res[0] ?? 1
+  let out = res[1] ?? ""
+  if stdr.len(out) > 0 { stdr.write(out) }
+  return code == 0
 }
 
 : prepare_macos_app_bundle(exe_path = string, bundle_id = string, bundle_name = string) (( bool )) {
@@ -5244,17 +5309,7 @@ entry() (( -- )) {
   let ?fallback_cleanup_c = ""
   let ?detected_ext_module = ""
   if is_run_mode {
-    -- Quick text scan for bring statements that might reference external modules
-    let known_ext = ["cogito"]
-    let ?ki = 0
-    let kn = stdr.len(known_ext)
-    for (; ki < kn; ki = ki + 1) {
-      let km = known_ext[ki] ?? ""
-      if str_find(source_raw, stdr.str_concat("bring ", km)) >= 0 {
-        detected_ext_module = km
-        break
-      }
-    }
+    detected_ext_module = detect_first_external_module_from_source(entry_path, source_raw)
   }
 
   -- Early cache check for run mode: skip all parsing if binary is fresh
@@ -5363,8 +5418,12 @@ entry() (( -- )) {
   let uname_res = stdr.run_command("uname")
   let ?uname_out = uname_res[1] ?? ""
   let ?is_macos = false
+  let ?is_linux = false
   if stdr.len(uname_out) >= 6 {
     if stdr.slice(uname_out, 0, 6) == "Darwin" { is_macos = true }
+  }
+  if stdr.len(uname_out) >= 5 {
+    if stdr.slice(uname_out, 0, 5) == "Linux" { is_linux = true }
   }
 
   let ?app_name = sanitize_filename_component(stem_name(entry_path))
@@ -5407,6 +5466,12 @@ entry() (( -- )) {
   }
 
   let src_dir = dir_of(entry_path)
+  let ?ext_module_path = ""
+  let ?ext_packager_path = ""
+  if uses_ext_module {
+    ext_module_path = resolve_bring(ext_mod_name, src_dir)
+    ext_packager_path = find_ext_module_packager(ext_mod_name, ext_module_path)
+  }
   let ?need_compile = true
   let ?stale_out = false
   if is_run_mode {
@@ -5540,6 +5605,12 @@ entry() (( -- )) {
       stdr.write(out ?? "")
       stdr.write("\n")
       return
+    }
+
+    if uses_ext_module && stdr.len(ext_packager_path) > 0 {
+      if !run_ext_module_packager(ext_packager_path, entry_path, out_path, app_name) {
+        stdr.write("WARN: external module packager failed\n")
+      }
     }
 
     -- Write run manifest for early cache on next run

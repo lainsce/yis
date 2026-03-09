@@ -460,9 +460,6 @@ typedef struct {
     size_t loop_stack_len;
     size_t loop_stack_cap;
 
-    bool uses_cogito;
-    const char *ext_module_name;
-
     // Hash map caches for env lookups
     StrMap class_map;       // qname -> index into env->classes
     StrMap fun_map;         // "cask\0name" -> index into env->funs
@@ -2301,40 +2298,6 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         out->tmp = t;
                         return true;
                     }
-                    // Embed SUM file contents at compile time for cogito.load_sum("literal.sum")
-                    // so the stylesheet is baked into the binary and works regardless of CWD.
-                    if (cg->uses_cogito && cg->ext_module_name &&
-                        str_eq_c(name, "load_sum") && e->as.call.args_len == 1) {
-                        Expr *arg0 = e->as.call.args[0];
-                        if (arg0 && arg0->kind == EXPR_STR && arg0->as.str_lit.parts &&
-                            arg0->as.str_lit.parts->len == 1 && arg0->as.str_lit.parts->parts[0].kind == STR_PART_TEXT) {
-                            Str lit = arg0->as.str_lit.parts->parts[0].as.text;
-                            if (lit.len > 0) {
-                                // Resolve relative to the calling source file's directory
-                                char *src_path = arena_strndup(cg->arena, path.data, path.len);
-                                char *src_dir = path_dirname(src_path);
-                                char *sum_path = path_join(src_dir ? src_dir : ".", arena_strndup(cg->arena, lit.data, lit.len));
-                                free(src_dir);
-                                if (sum_path) {
-                                    size_t sum_len = 0;
-                                    char *sum_src = read_file_arena(sum_path, cg->arena, &sum_len, NULL);
-                                    free(sum_path);
-                                    if (sum_src && sum_len > 0) {
-                                        char *esc = c_escape(cg->arena, (Str){sum_src, sum_len});
-                                        if (esc) {
-                                            w_line(&cg->w, "%s_load_sum_inline(\"%s\");", cg->ext_module_name, esc);
-                                            char *t = codegen_new_tmp(cg);
-                                            w_line(&cg->w, "YisVal %s = YV_NULLV;", t);
-                                            gen_expr_add(out, t);
-                                            out->tmp = t;
-                                            return true;
-                                        }
-                                    }
-                                }
-                                // Fall through to runtime load_sum if file not found at compile time
-                            }
-                        }
-                    }
                     FunSig *sig = codegen_fun_sig(cg, mod, name);
                     if (!sig) {
                         return cg_set_errf(err, path, e->line, e->col, "unknown %.*s.%.*s", (int)mod.len, mod.data, (int)name.len, name.data);
@@ -3566,8 +3529,7 @@ static void codegen_free(Codegen *cg) {
 }
 
 static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ext_bindings_path, Diag *err) {
-    cg->uses_cogito = (ext_module_name != NULL);
-    cg->ext_module_name = ext_module_name;
+    bool has_ext_module = ext_module_name && ext_module_name[0];
     codegen_collect_lambdas(cg);
 
     const char *runtime_override = getenv("YIS_RUNTIME");
@@ -3638,13 +3600,13 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
         runtime_len = (size_t)yis_runtime_embedded_len;
     }
 
-    size_t cogito_bindings_len = 0;
-    const char *cogito_bindings_src = NULL;
+    size_t module_bindings_len = 0;
+    const char *module_bindings_src = NULL;
     if (ext_bindings_path && ext_bindings_path[0]) {
         char *bindings_src =
-            read_file_with_includes(ext_bindings_path, "// @include", &tmp_arena, &cogito_bindings_len, NULL);
+            read_file_with_includes(ext_bindings_path, "// @include", &tmp_arena, &module_bindings_len, NULL);
         if (bindings_src) {
-            cogito_bindings_src = bindings_src;
+            module_bindings_src = bindings_src;
         } else {
             arena_free(&tmp_arena);
             free(exe_runtime_path);
@@ -3657,14 +3619,14 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
     if (runtime_len == 0 || runtime_src[runtime_len - 1] != '\n') {
         sb_append_char(&cg->out, '\n');
     }
-    if (cg->uses_cogito) {
-        if (!cogito_bindings_src || cogito_bindings_len == 0) {
+    if (has_ext_module) {
+        if (!module_bindings_src || module_bindings_len == 0) {
             arena_free(&tmp_arena);
             free(exe_runtime_path);
             return cg_set_err(err, (Str){0}, "program imports external module but bindings file was not found");
         }
-        sb_append_n(&cg->out, cogito_bindings_src, cogito_bindings_len);
-        if (cogito_bindings_src[cogito_bindings_len - 1] != '\n') {
+        sb_append_n(&cg->out, module_bindings_src, module_bindings_len);
+        if (module_bindings_src[module_bindings_len - 1] != '\n') {
             sb_append_char(&cg->out, '\n');
         }
     }
@@ -3979,50 +3941,11 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
     w_line(&cg->w, "@autoreleasepool {");
     cg->w.indent++;
     w_line(&cg->w, "yis_runtime_init();");
-    // Set script directory when entry_path is available AND using an external module
-    if (cg->uses_cogito && cg->entry_path.data && cg->entry_path.len > 0) {
-        // Find the directory of the entry script
-        const char *path = cg->entry_path.data;
-        size_t len = cg->entry_path.len;
-        const char *last_slash = NULL;
-        for (size_t i = 0; i < len; i++) {
-            if (path[i] == '/' || path[i] == '\\') last_slash = path + i;
-        }
-        if (last_slash) {
-            size_t dir_len = (size_t)(last_slash - path);
-            char *dir = arena_alloc(cg->arena, dir_len + 1);
-            memcpy(dir, path, dir_len);
-            dir[dir_len] = 0;
-            w_line(&cg->w, "YisVal __script_dir = YV_STR(stdr_str_lit(\"%s\"));", dir);
-            w_line(&cg->w, "__%s_set_script_dir(__script_dir);", cg->ext_module_name);
-            w_line(&cg->w, "yis_release_val(__script_dir);");
-        } else {
-        }
-    } else {
-    }
     w_line(&cg->w, "yis_entry();");
     cg->w.indent--;
     w_line(&cg->w, "}");
     w_line(&cg->w, "#else");
     w_line(&cg->w, "yis_runtime_init();");
-    // Set script directory when entry_path is available AND using an external module
-    if (cg->uses_cogito && cg->entry_path.data && cg->entry_path.len > 0) {
-        const char *path = cg->entry_path.data;
-        size_t len = cg->entry_path.len;
-        const char *last_slash = NULL;
-        for (size_t i = 0; i < len; i++) {
-            if (path[i] == '/' || path[i] == '\\') last_slash = path + i;
-        }
-        if (last_slash) {
-            size_t dir_len = (size_t)(last_slash - path);
-            char *dir = arena_alloc(cg->arena, dir_len + 1);
-            memcpy(dir, path, dir_len);
-            dir[dir_len] = 0;
-            w_line(&cg->w, "YisVal __script_dir = YV_STR(stdr_str_lit(\"%s\"));", dir);
-            w_line(&cg->w, "__%s_set_script_dir(__script_dir);", cg->ext_module_name);
-            w_line(&cg->w, "yis_release_val(__script_dir);");
-        }
-    }
     w_line(&cg->w, "yis_entry();");
     w_line(&cg->w, "#endif");
     w_line(&cg->w, "return 0;");

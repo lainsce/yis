@@ -33,17 +33,7 @@ static const char yis_runtime_embedded[] = "// ---- Yis runtime (minimal) ----\n
 "  yis_argv = argv;\n"
 "}\n"
 "\n"
-"#define COGITO_DEFINED_COGITO_DEBUG_ENABLED\n"
-"static bool cogito_debug_enabled(void) { return false; }\n"
-"static const char* cogito_font_path_active = NULL;\n"
-"\n"
 "static void yis_runtime_init(void) {\n"
-"#if defined(__APPLE__)\n"
-"  if (cogito_debug_enabled()) {\n"
-"    fprintf(stderr, \"cogito: runtime_init\\n\");\n"
-"    fflush(stderr);\n"
-"  }\n"
-"#endif\n"
 "#if defined(_WIN32)\n"
 "  yis_stdout_isatty = _isatty(_fileno(stdout));\n"
 "#else\n"
@@ -1056,8 +1046,8 @@ static const char yis_runtime_embedded[] = "// ---- Yis runtime (minimal) ----\n
 "  return f->fn(f->env, argc, argv);\n"
 "}\n"
 "\n"
-"// ---- Cogito GUI (shared library bindings) ----\n"
-"// Injected by codegen when the program imports `cogito`.\n"
+"// ---- External module bindings ----\n"
+"// Injected by codegen when the program imports an external module.\n"
 "";
 static const unsigned int yis_runtime_embedded_len = sizeof(yis_runtime_embedded) - 1;
 

@@ -30,17 +30,7 @@ void yis_set_args(int argc, char **argv) {
   yis_argv = argv;
 }
 
-#define COGITO_DEFINED_COGITO_DEBUG_ENABLED
-static bool cogito_debug_enabled(void) { return false; }
-static const char* cogito_font_path_active = NULL;
-
 static void yis_runtime_init(void) {
-#if defined(__APPLE__)
-  if (cogito_debug_enabled()) {
-    fprintf(stderr, "cogito: runtime_init\n");
-    fflush(stderr);
-  }
-#endif
 #if defined(_WIN32)
   yis_stdout_isatty = _isatty(_fileno(stdout));
 #else
@@ -1053,5 +1043,5 @@ static YisVal yis_call(YisVal fval, int argc, YisVal* argv) {
   return f->fn(f->env, argc, argv);
 }
 
-// ---- Cogito GUI (shared library bindings) ----
-// Injected by codegen when the program imports `cogito`.
+// ---- External module bindings ----
+// Injected by codegen when the program imports an external module.

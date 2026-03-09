@@ -90,6 +90,20 @@ static int run_binary_with_args(const char *path, int argc, char **argv) {
     return system(cmd);
 }
 
+#if defined(__APPLE__) || defined(__linux__)
+static bool run_module_packager_hook(const char *packager_path, const char *entry_path,
+                                     const char *out_path, const char *app_name) {
+    if (!packager_path || !packager_path[0]) return true;
+    if (!entry_path || !out_path || !app_name) return false;
+    char cmd[16384];
+    int n = snprintf(cmd, sizeof(cmd),
+                     "sh \"%s\" \"%s\" \"%s\" \"%s\"",
+                     packager_path, entry_path, out_path, app_name);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) return false;
+    return system(cmd) == 0;
+}
+#endif
+
 #if defined(__APPLE__)
 static bool write_text_file(const char *path, const char *text) {
     if (!path || !text) return false;
@@ -100,7 +114,6 @@ static bool write_text_file(const char *path, const char *text) {
     fclose(f);
     return ok;
 }
-
 static bool prepare_macos_app_bundle(const char *exe_path, const char *bundle_id, const char *bundle_name) {
     if (!exe_path || !bundle_id || !bundle_id[0] || !bundle_name || !bundle_name[0]) return false;
 
@@ -464,23 +477,22 @@ int main(int argc, char **argv) {
     }
 
 
-        // Detect external modules (e.g. cogito) and resolve their build artifacts.
+        // Detect the first external module and resolve its build artifacts.
         const char *ext_module_name = NULL;
+        char ext_module_name_buf[256];
         const char *ext_bindings_path_str = NULL;
         char *ext_bindings_alloc = NULL;
+        char *ext_packager_alloc = NULL;
+        ext_module_name_buf[0] = '\0';
         {
-            // Check known external modules. Currently we support one external
-            // module per program; this loop picks the first match.
-            const char *known_ext_modules[] = { "cogito", NULL };
-            for (size_t i = 0; known_ext_modules[i]; i++) {
-                if (program_uses_module(prog, known_ext_modules[i])) {
-                    ext_module_name = known_ext_modules[i];
-                    break;
-                }
-            }
-            if (ext_module_name) {
-                ext_bindings_alloc = find_module_bindings(ext_module_name, NULL);
+            if (program_find_first_external_module(prog, NULL, ext_module_name_buf,
+                                                   sizeof(ext_module_name_buf))) {
+                ext_module_name = ext_module_name_buf;
+                char *ext_module_yi = resolve_external_module(ext_module_name, NULL);
+                ext_bindings_alloc = find_module_bindings(ext_module_name, ext_module_yi);
                 ext_bindings_path_str = ext_bindings_alloc;
+                ext_packager_alloc = find_module_packager(ext_module_name, ext_module_yi);
+                free(ext_module_yi);
             }
         }
         bool uses_ext_module = (ext_module_name != NULL);
@@ -546,7 +558,6 @@ int main(int argc, char **argv) {
                 snprintf(name_without_ext, sizeof(name_without_ext), "%s", appid_name);
             }
         }
-
 #if defined(_WIN32)
         snprintf(unique_bin_name, sizeof(unique_bin_name), "%s.exe", name_without_ext);
 #else
@@ -619,6 +630,7 @@ int main(int argc, char **argv) {
         if (cache_enabled && cache_bin && path_is_file(cache_bin)) {
             int rc = run_binary_with_args(cache_bin, run_argc, run_argv);
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -628,10 +640,7 @@ int main(int argc, char **argv) {
         }
 
         // When not using cache, check if binary is up-to-date.
-        // For apps using external modules we skip this shortcut because SUM can be embedded
-        // from external files (e.g. cogito.load_sum("...")), and those files
-        // are not tracked by this single source mtime check.
-        if (!cache_enabled && !uses_ext_module && !is_self_host_entry && path_is_file(unique_bin_name)) {
+        if (!cache_enabled && !is_self_host_entry && path_is_file(unique_bin_name)) {
             long long bin_mtime = path_mtime(unique_bin_name);
             long long src_mtime = path_mtime(entry);
             if (bin_mtime >= 0 && src_mtime >= 0 && bin_mtime >= src_mtime) {
@@ -644,6 +653,7 @@ int main(int argc, char **argv) {
 #endif
                 int rc = run_binary_with_args(run_cmd_buf, run_argc, run_argv);
                 free(ext_bindings_alloc);
+                free(ext_packager_alloc);
                 arena_free(&arena);
                 return rc == 0 ? 0 : 1;
             }
@@ -653,6 +663,7 @@ int main(int argc, char **argv) {
         if (!prog || err.message) {
             diag_print_enhanced(&err, verbose_mode);
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -663,6 +674,7 @@ int main(int argc, char **argv) {
         if (!typecheck_program(prog, &arena, &err)) {
             diag_print_enhanced(&err, verbose_mode);
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -695,6 +707,7 @@ int main(int argc, char **argv) {
             if (!prepare_macos_app_bundle(bin_path, macos_bundle_id, name_without_ext)) {
                 fprintf(stderr, "error: failed to prepare macOS app bundle (%s)\n", name_without_ext);
                 free(ext_bindings_alloc);
+                free(ext_packager_alloc);
                 free(cache_base);
                 free(cache_dir);
                 free(cache_c);
@@ -710,6 +723,7 @@ int main(int argc, char **argv) {
         if (n < 0 || (size_t)n >= sizeof(cmd)) {
             fprintf(stderr, "error: compile command too long\n");
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -721,6 +735,7 @@ int main(int argc, char **argv) {
         if (rc != 0) {
             fprintf(stderr, "error: C compiler failed (code %d)\n", rc);
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             free(cache_base);
             free(cache_dir);
             free(cache_c);
@@ -728,11 +743,19 @@ int main(int argc, char **argv) {
             arena_free(&arena);
             return rc;
         }
+#if defined(__APPLE__) || defined(__linux__)
+        if (ext_packager_alloc && ext_packager_alloc[0]) {
+            if (!run_module_packager_hook(ext_packager_alloc, entry, bin_path, name_without_ext)) {
+                fprintf(stderr, "warning: external module packager failed for %s\n", ext_module_name);
+            }
+        }
+#endif
         const char *emit_c_to = getenv("YIS_EMIT_C_TO");
         if (emit_c_to && emit_c_to[0]) {
             if (!path_is_file(c_path)) {
                 fprintf(stderr, "error: C file was not written\n");
                 free(ext_bindings_alloc);
+                free(ext_packager_alloc);
                 free(cache_base);
                 free(cache_dir);
                 free(cache_c);
@@ -748,6 +771,7 @@ int main(int argc, char **argv) {
                 if (dst) fclose(dst);
                 fprintf(stderr, "error: cannot copy C to %s\n", emit_c_to);
                 free(ext_bindings_alloc);
+                free(ext_packager_alloc);
                 free(cache_base);
                 free(cache_dir);
                 free(cache_c);
@@ -763,6 +787,7 @@ int main(int argc, char **argv) {
             fclose(dst);
             (void)remove(c_path);
             free(ext_bindings_alloc);
+            free(ext_packager_alloc);
             arena_free(&arena);
             free(cache_base);
             free(cache_dir);
@@ -780,6 +805,7 @@ int main(int argc, char **argv) {
         arena_free(&arena);
         rc = run_binary_with_args(run_cmd, run_argc, run_argv);
         free(ext_bindings_alloc);
+        free(ext_packager_alloc);
         free(cache_base);
         free(cache_dir);
         free(cache_c);
