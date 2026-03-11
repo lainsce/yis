@@ -1785,10 +1785,23 @@ static Str cask_name_for_path(Arena *arena, Str path) {
 }
 
 static Str normalize_import_name(Arena *arena, Str name) {
-    if (str_ends_with(name, ".yi")) {
-        return arena_str_copy(arena, name.data, name.len - 3);
+    Str n = name;
+    if (str_ends_with(n, ".yi")) {
+        n = arena_str_copy(arena, n.data, n.len - 3);
     }
-    return name;
+    // For dotted paths (e.g. "widgets.queue"), use the last segment
+    size_t last_dot = 0;
+    bool has_dot = false;
+    for (size_t i = 0; i < n.len; i++) {
+        if (n.data[i] == '.') {
+            last_dot = i;
+            has_dot = true;
+        }
+    }
+    if (has_dot) {
+        return arena_str_copy(arena, n.data + last_dot + 1, n.len - last_dot - 1);
+    }
+    return n;
 }
 
 static ClassInfo *find_class(GlobalEnv *env, Str qname) {
@@ -2846,7 +2859,15 @@ method_call:
         Binding *b = locals_lookup(loc, fname);
         if (b) {
             Ty *fn_ty = tc_expr_inner(fn, ctx, loc, env, err);
-            if (!fn_ty || fn_ty->tag != TY_FN) {
+            if (!fn_ty) {
+                set_errf(err, ctx->cask_path, fn->line, fn->col, "%.*s: unknown function '%.*s'", (int)ctx->cask_path.len, ctx->cask_path.data, (int)fname.len, fname.data);
+                return NULL;
+            }
+            if (ty_is_any(fn_ty)) {
+                for (size_t i = 0; i < argc; i++) tc_expr_inner(args[i], ctx, loc, env, err);
+                return fn_ty;
+            }
+            if (fn_ty->tag != TY_FN) {
                 set_errf(err, ctx->cask_path, fn->line, fn->col, "%.*s: unknown function '%.*s'", (int)ctx->cask_path.len, ctx->cask_path.data, (int)fname.len, fname.data);
                 return NULL;
             }

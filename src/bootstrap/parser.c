@@ -543,7 +543,7 @@ static Import *parse_import(Parser *p) {
     Tok *t = eat(p, TOK_IDENT);
     if (!p->ok) return NULL;
     Str name = t->val.ident;
-    if (maybe(p, TOK_DOT)) {
+    while (maybe(p, TOK_DOT)) {
         Tok *ext = eat(p, TOK_IDENT);
         if (!p->ok) return NULL;
         name = str_concat(p, name, ".", ext->val.ident);

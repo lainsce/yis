@@ -4336,22 +4336,31 @@ def ?g_last_line_num = 0
 }
 
 : resolve_bring(bname = string, src_dir = string) (( string )) {
+  -- Convert dots to path separators for subdirectory bring
+  let ?path_name = bname
+  let ?pi = 0
+  let pn = stdr.len(bname)
+  for (; pi < pn; pi = pi + 1) {
+    if stdr.slice(bname, pi, pi + 1) == "." {
+      path_name = stdr.str_concat(stdr.str_concat(stdr.slice(path_name, 0, pi), "/"), stdr.slice(path_name, pi + 1, stdr.len(path_name)))
+    }
+  }
   -- Check cache first
   let cache_key = stdr.str_concat(stdr.str_concat(bname, ":"), src_dir)
   let cached = g_path_cache[cache_key]
   if !stdr.is_null(cached) { return cached ?? "" }
   -- First try: same directory as the source file
-  let ?p = stdr.str_concat(stdr.str_concat(src_dir, bname), ".yi")
+  let ?p = stdr.str_concat(stdr.str_concat(src_dir, path_name), ".yi")
   if file_exists(p) == 0 { g_path_cache[cache_key] = p; return p }
   -- Second try: parent directory of source
-  p = stdr.str_concat(stdr.str_concat(stdr.str_concat(src_dir, "../"), bname), ".yi")
+  p = stdr.str_concat(stdr.str_concat(stdr.str_concat(src_dir, "../"), path_name), ".yi")
   if file_exists(p) == 0 { g_path_cache[cache_key] = p; return p }
   -- Third try: project src tree from cwd
-  p = stdr.str_concat(stdr.str_concat("src/", bname), ".yi")
+  p = stdr.str_concat(stdr.str_concat("src/", path_name), ".yi")
   if file_exists(p) == 0 { g_path_cache[cache_key] = p; return p }
-  p = stdr.str_concat(stdr.str_concat("../src/", bname), ".yi")
+  p = stdr.str_concat(stdr.str_concat("../src/", path_name), ".yi")
   if file_exists(p) == 0 { g_path_cache[cache_key] = p; return p }
-  p = stdr.str_concat(stdr.str_concat("../../src/", bname), ".yi")
+  p = stdr.str_concat(stdr.str_concat("../../src/", path_name), ".yi")
   if file_exists(p) == 0 { g_path_cache[cache_key] = p; return p }
   -- Fourth try: stdlib search (env/install/dev paths)
   p = resolve_stdlib_module_path(bname)
@@ -4366,7 +4375,7 @@ def ?g_last_line_num = 0
     if file_exists(dev3) == 0 { g_path_cache[cache_key] = dev3; return dev3 }
   }
   -- Fallback to original behavior
-  p = stdr.str_concat(stdr.str_concat(src_dir, bname), ".yi")
+  p = stdr.str_concat(stdr.str_concat(src_dir, path_name), ".yi")
   g_path_cache[cache_key] = p
   return p
 }
@@ -5514,7 +5523,16 @@ def ?g_last_line_num = 0
     let binfo = brings[bi]
     let bname = binfo[0] ?? ""
     let bdir = binfo[1] ?? ""
-    g_bring_names[bname] = true
+    -- Register last segment of dotted name as the namespace key
+    let ?bring_key = bname
+    let ?bk_i = 0
+    let bk_n = stdr.len(bname)
+    for (; bk_i < bk_n; bk_i = bk_i + 1) {
+      if stdr.slice(bname, bk_i, bk_i + 1) == "." {
+        bring_key = stdr.slice(bname, bk_i + 1, bk_n)
+      }
+    }
+    g_bring_names[bring_key] = true
     if stdr.len(ext_module_name) == 0 && is_external_module(bname) {
       ext_module_name = bname
     }
@@ -5524,12 +5542,12 @@ def ?g_last_line_num = 0
     if !stdr.is_null(mod_ast3) {
       let mod_decls = mod_ast3[decls_key] ?? []: [any]
       -- Find module's cask name
-      let ?mod_cask = bname
+      let ?mod_cask = bring_key
       let ?mi = 0
       let mdn = stdr.len(mod_decls)
       for (; mi < mdn; mi = mi + 1) {
         let md2 = mod_decls[mi]
-        if md2[tag] == "cask" { mod_cask = md2[name_key] ?? bname }
+        if md2[tag] == "cask" { mod_cask = md2[name_key] ?? bring_key }
       }
       build_class_info(mod_decls, mod_cask)
     }

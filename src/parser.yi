@@ -1169,9 +1169,19 @@ bring stdr
   if t[kind] != "kw_bring" { return pair(i, null) }
   let t1 = peek(toks, i + 1)
   if t1[kind] != "ident" { return pair(i + 1, null) }
-  let name = t1[text] ?? ""
-  let t2 = peek(toks, i + 2)
-  let next = if t2[kind] == "semi" { i + 3 } else { i + 2 }
+  let ?name = t1[text] ?? ""
+  let ?next = i + 2
+  -- Handle dotted bring paths: bring a.b.c
+  for (; true; ) {
+    let td = peek(toks, next)
+    if td[kind] != "dot" { break }
+    let ts = peek(toks, next + 1)
+    if ts[kind] != "ident" { break }
+    name = stdr.str_concat(stdr.str_concat(name, "."), ts[text] ?? "")
+    next = next + 2
+  }
+  let tsemi = peek(toks, next)
+  if tsemi[kind] == "semi" { next = next + 1 }
   let ?node = []: [string => any]
   node[tag] = "bring"
   node[name_key] = name

@@ -334,6 +334,13 @@ static Module *load_file(const char *path,
                 set_err(err, abs_path, "'.e' files are no longer supported; use .yi");
                 return NULL;
             }
+            // Convert dots to path separators for subdirectory bring
+            {
+                size_t nlen = strlen(name);
+                for (size_t k = 0; k < nlen; k++) {
+                    if (name[k] == '.') name[k] = '/';
+                }
+            }
             if (!str_ends_with(imp->name, ".yi")) {
                 size_t nlen = strlen(name);
                 char *with_ext = (char *)malloc(nlen + 4);
@@ -343,7 +350,7 @@ static Module *load_file(const char *path,
                     return NULL;
                 }
                 memcpy(with_ext, name, nlen);
-                memcpy(with_ext + nlen, ".yi", 3);
+                memcpy(with_ext + nlen, ".yi", 4);
                 free(name);
                 name = with_ext;
             }

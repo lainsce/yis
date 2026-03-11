@@ -683,7 +683,10 @@ static Str cask_name_for_path(Arena *arena, Str path) {
         }
     }
     size_t name_len = len - start;
-    if (name_len >= 2 && p[start + name_len - 2] == '.' && p[start + name_len - 1] == 'e') {
+    if (name_len >= 3 && p[start + name_len - 3] == '.' &&
+        p[start + name_len - 2] == 'y' && p[start + name_len - 1] == 'i') {
+        name_len -= 3;
+    } else if (name_len >= 2 && p[start + name_len - 2] == '.' && p[start + name_len - 1] == 'e') {
         name_len -= 2;
     }
     char *buf = arena_strndup(arena, p + start, name_len);
