@@ -50,30 +50,35 @@ bring stdr
 }
 
 : _shell_quote(text = string) (( string )) {
-  let ?out = "'"
-  let ?i = 0
+  let ?parts = []: [any]
+  stdr.push(parts, "'")
+  let ?chunk_start = 0
   let n = stdr.len(text)
+  let ?i = 0
   for (; i < n; i = i + 1) {
-    let ch = stdr.slice(text, i, i + 1)
-    if ch == "'" {
-      out = stdr.str_concat(out, "'\"'\"'")
-    } else {
-      out = stdr.str_concat(out, ch)
+    if stdr.slice(text, i, i + 1) == "'" {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      stdr.push(parts, "'\"'\"'")
+      chunk_start = i + 1
     }
   }
-  out = stdr.str_concat(out, "'")
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  stdr.push(parts, "'")
+  return stdr.join(parts)
 }
 
 : _strip_newlines(text = string) (( string )) {
-  let ?out = ""
-  let ?i = 0
+  let ?parts = []: [any]
+  let ?chunk_start = 0
   let n = stdr.len(text)
+  let ?i = 0
   for (; i < n; i += 1) {
-    let ch = stdr.slice(text, i, i + 1)
-    if stdr.char_code(ch) != 10 && stdr.char_code(ch) != 13 {
-      out = stdr.str_concat(out, ch)
+    let code = stdr.char_code(stdr.slice(text, i, i + 1))
+    if code == 10 || code == 13 {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      chunk_start = i + 1
     }
   }
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  return stdr.join(parts)
 }

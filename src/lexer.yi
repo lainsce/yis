@@ -443,23 +443,27 @@ bring stdr
         return [tok("str", line, col, "", 0, str_val), j, line, col]
       }
 
-      let ?str_out = ""
+      let ?str_parts = []: [any]
+      let ?chunk_start = j
       for (; j < n; ) {
         let ch = stdr.slice(source, j, j + 1)
         if ch == "\"" {
-          return [tok("str", line, col, "", 0, str_out), j + 1, line, start_col + (j - i + 1)]
+          if chunk_start < j { stdr.push(str_parts, stdr.slice(source, chunk_start, j)) }
+          return [tok("str", line, col, "", 0, stdr.join(str_parts)), j + 1, line, start_col + (j - i + 1)]
         }
         if ch == "\\" && j + 1 < n {
+          if chunk_start < j { stdr.push(str_parts, stdr.slice(source, chunk_start, j)) }
           let r = decode_escape(source, j, n)
-          str_out = stdr.str_concat(str_out, stdr.str(r["text"] ?? ""))
+          stdr.push(str_parts, stdr.str(r["text"] ?? ""))
           j = r["next"] ?? (j + 2)
+          chunk_start = j
           continue
         }
         if stdr.char_code(ch) == 10 { break }
-        str_out = stdr.str_concat(str_out, ch)
         j = j + 1
       }
-      return [tok("str", line, col, "", 0, str_out), j, line, col]
+      if chunk_start < j { stdr.push(str_parts, stdr.slice(source, chunk_start, j)) }
+      return [tok("str", line, col, "", 0, stdr.join(str_parts)), j, line, col]
     }
     -- Interpolated string: split into parts
     if !decode_escapes {
@@ -519,18 +523,23 @@ bring stdr
     }
 
     let ?parts = []: [any]
-    let ?seg = ""
+    let ?seg_parts = []: [any]
+    let ?seg_chunk_start = j
     for (; j < n; ) {
       let ch = stdr.slice(source, j, j + 1)
       if ch == "\"" { break }
       if ch == "\\" && j + 1 < n {
+        if seg_chunk_start < j { stdr.push(seg_parts, stdr.slice(source, seg_chunk_start, j)) }
         let r = decode_escape(source, j, n)
-        seg = stdr.str_concat(seg, stdr.str(r["text"] ?? ""))
+        stdr.push(seg_parts, stdr.str(r["text"] ?? ""))
         j = r["next"] ?? (j + 2)
+        seg_chunk_start = j
         continue
       }
       if ch == "$" && j + 1 < n && stdr.slice(source, j + 1, j + 2) == "$" {
-        -- $$ found: flush text segment
+        if seg_chunk_start < j { stdr.push(seg_parts, stdr.slice(source, seg_chunk_start, j)) }
+        let seg = stdr.join(seg_parts)
+        seg_parts = []: [any]
         if stdr.len(seg) > 0 {
           let ?tp = []: [string => any]
           let tkk = "kind"
@@ -538,9 +547,7 @@ bring stdr
           tp[tkk] = "text"
           tp[tvk] = seg
           parts = stdr.concat(parts, [tp])
-          seg = ""
         }
-        -- Collect expression until next $$
         let ?vstart = j + 2
         let ?vend = vstart
         for (; vend < n; ) {
@@ -560,19 +567,20 @@ bring stdr
         } else {
           j = vend
         }
+        seg_chunk_start = j
         continue
       }
       if stdr.char_code(ch) == 10 { break }
-      seg = stdr.str_concat(seg, ch)
       j = j + 1
     }
-    -- Flush remaining text
-    if stdr.len(seg) > 0 {
+    if seg_chunk_start < j { stdr.push(seg_parts, stdr.slice(source, seg_chunk_start, j)) }
+    let seg_final = stdr.join(seg_parts)
+    if stdr.len(seg_final) > 0 {
       let ?tp = []: [string => any]
       let tkk = "kind"
       let tvk = "val"
       tp[tkk] = "text"
-      tp[tvk] = seg
+      tp[tvk] = seg_final
       parts = stdr.concat(parts, [tp])
     }
     let ?t_interp = tok("str_interp", line, col, "", 0, "")

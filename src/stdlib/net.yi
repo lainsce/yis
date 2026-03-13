@@ -24,19 +24,22 @@ bring stdr
 }
 
 : _shell_quote(text = string) (( string )) {
-  let ?out = "'"
-  let ?i = 0
+  let ?parts = []: [any]
+  stdr.push(parts, "'")
+  let ?chunk_start = 0
   let n = stdr.len(text)
+  let ?i = 0
   for (; i < n; i = i + 1) {
     let ch = stdr.slice(text, i, i + 1)
     if ch == "'" {
-      out = stdr.str_concat(out, "'\"'\"'")
-    } else {
-      out = stdr.str_concat(out, ch)
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      stdr.push(parts, "'\"'\"'")
+      chunk_start = i + 1
     }
   }
-  out = stdr.str_concat(out, "'")
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  stdr.push(parts, "'")
+  return stdr.join(parts)
 }
 
 : _contains(text = string, needle = string) (( bool )) {
@@ -91,41 +94,40 @@ bring stdr
 }
 
 :: encode_component(text = string) (( string )) {
-  let ?out = ""
-  let ?i = 0
+  let ?parts = []: [any]
+  let ?chunk_start = 0
   let n = stdr.len(text)
+  let ?i = 0
   for (; i < n; i = i + 1) {
-    let ch = stdr.slice(text, i, i + 1)
-    let code = stdr.char_code(ch)
-    if _is_unreserved(code) {
-      out = stdr.str_concat(out, ch)
-    } else {
+    let code = stdr.char_code(stdr.slice(text, i, i + 1))
+    if !_is_unreserved(code) {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
       let hi = code / 16
       let lo = code - hi * 16
-      out = stdr.str_concat(out, "%")
-      out = stdr.str_concat(out, _hex_digit(hi))
-      out = stdr.str_concat(out, _hex_digit(lo))
+      stdr.push(parts, "%")
+      stdr.push(parts, _hex_digit(hi))
+      stdr.push(parts, _hex_digit(lo))
+      chunk_start = i + 1
     }
   }
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  return stdr.join(parts)
 }
 
 :: build_query(params = any) (( string )) {
-  let ?out = ""
+  let ?parts = []: [any]
   let ?i = 0
   let n = stdr.len(params)
   for (; i < n; i = i + 1) {
     let pair = params[i]
     let k = encode_component(_pair_key(pair))
     let v = encode_component(_pair_val(pair))
-    if stdr.len(out) > 0 {
-      out = stdr.str_concat(out, "&")
-    }
-    out = stdr.str_concat(out, k)
-    out = stdr.str_concat(out, "=")
-    out = stdr.str_concat(out, v)
+    if i > 0 { stdr.push(parts, "&") }
+    stdr.push(parts, k)
+    stdr.push(parts, "=")
+    stdr.push(parts, v)
   }
-  return out
+  return stdr.join(parts)
 }
 
 :: with_query(url = string, params = any) (( string )) {

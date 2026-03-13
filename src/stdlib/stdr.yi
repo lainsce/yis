@@ -296,19 +296,21 @@ macro is_none() (( bool )) {
 }
 
 :: shell_quote(text = string) (( string )) {
-  let ?out = "'"
-  let ?i = 0
+  let ?p = []: [any]
+  push(p, "'")
+  let ?chunk_start = 0
   let n = len(text)
+  let ?i = 0
   for (; i < n; i = i + 1) {
-    let ch = slice(text, i, i + 1)
-    if ch == "'" {
-      out = str_concat(out, "'\"'\"'")
-    } else {
-      out = str_concat(out, ch)
+    if slice(text, i, i + 1) == "'" {
+      if chunk_start < i { push(p, slice(text, chunk_start, i)) }
+      push(p, "'\"'\"'")
+      chunk_start = i + 1
     }
   }
-  out = str_concat(out, "'")
-  return out
+  if chunk_start < n { push(p, slice(text, chunk_start, n)) }
+  push(p, "'")
+  return join(p)
 }
 
 :: basename(path = string) (( string )) {

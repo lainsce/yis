@@ -3,26 +3,26 @@ cask json
 bring stdr
 
 :: escape(text = string) (( string )) {
-  let ?out = ""
-  let ?i = 0
+  let ?parts = []: [any]
+  let ?chunk_start = 0
   let n = stdr.len(text)
+  let ?i = 0
   for (; i < n; i += 1) {
     let ch = stdr.slice(text, i, i + 1)
-    if ch == "\\" {
-      out = stdr.str_concat(out, "\\\\")
-    } elif ch == "\"" {
-      out = stdr.str_concat(out, "\\\"")
-    } elif ch == "\n" {
-      out = stdr.str_concat(out, "\\n")
-    } elif ch == "\r" {
-      out = stdr.str_concat(out, "\\r")
-    } elif ch == "\t" {
-      out = stdr.str_concat(out, "\\t")
-    } else {
-      out = stdr.str_concat(out, ch)
+    let ?esc = ""
+    if ch == "\\" { esc = "\\\\" }
+    elif ch == "\"" { esc = "\\\"" }
+    elif ch == "\n" { esc = "\\n" }
+    elif ch == "\r" { esc = "\\r" }
+    elif ch == "\t" { esc = "\\t" }
+    if stdr.len(esc) > 0 {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      stdr.push(parts, esc)
+      chunk_start = i + 1
     }
   }
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  return stdr.join(parts)
 }
 
 -- Yis Standard Library: json.yi
