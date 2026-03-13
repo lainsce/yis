@@ -360,9 +360,6 @@ static const char *get_error_tip(const char *msg) {
     if (strstr(msg, "module") && strstr(msg, "linker")) {
         return "Module library linking failed. Ensure the library is installed or set YIS_<NAME>_FLAGS with the correct linker path.";
     }
-    if (strstr(msg, "raylib") && (strstr(msg, "not found") || strstr(msg, "undefined"))) {
-        return "Raylib is required for GUI apps using external modules. Install it: 'brew install raylib' (macOS) or see docs.";
-    }
     if (strstr(msg, "compile command too long")) {
         return "The compilation command exceeded the buffer size. Try moving files to a shorter path.";
     }

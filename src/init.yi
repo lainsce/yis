@@ -5941,18 +5941,6 @@ entry() (( -- )) {
         -- Auto-detect library path
         mod_ldflags = detect_module_ldflags(ext_mod_name)
       }
-      -- Also add raylib flags for modules that need it
-      let ?ray_cflags = ""
-      let ?ray_ldflags = ""
-      let ray_cf_env = _env_value("YIS_RAYLIB_CFLAGS")
-      if stdr.len(ray_cf_env) > 0 { ray_cflags = ray_cf_env }
-      let ray_fl_env = _env_value("YIS_RAYLIB_FLAGS")
-      if stdr.len(ray_fl_env) > 0 { ray_ldflags = ray_fl_env }
-      elif is_macos {
-        -- Default raylib flags on macOS
-        let rl1 = stdr.run_command("test -f /opt/homebrew/lib/libraylib.a && echo y")
-        if rl1[0] == 0 { ray_ldflags = "-L/opt/homebrew/lib -lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo" }
-      }
       cc_cmd = "cc -o \""
       cc_cmd = stdr.str_concat(cc_cmd, out_path)
       cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
@@ -5964,16 +5952,8 @@ entry() (( -- )) {
         cc_cmd = stdr.str_concat(cc_cmd, mod_cflags)
         cc_cmd = stdr.str_concat(cc_cmd, " ")
       }
-      if stdr.len(ray_cflags) > 0 {
-        cc_cmd = stdr.str_concat(cc_cmd, ray_cflags)
-        cc_cmd = stdr.str_concat(cc_cmd, " ")
-      }
       if stdr.len(mod_ldflags) > 0 {
         cc_cmd = stdr.str_concat(cc_cmd, mod_ldflags)
-        cc_cmd = stdr.str_concat(cc_cmd, " ")
-      }
-      if stdr.len(ray_ldflags) > 0 {
-        cc_cmd = stdr.str_concat(cc_cmd, ray_ldflags)
         cc_cmd = stdr.str_concat(cc_cmd, " ")
       }
       cc_cmd = stdr.str_concat(cc_cmd, " 2>&1")

@@ -85,7 +85,7 @@ static const char *known_properties[] = {
     "margin-right", "margin-bottom", "min-width", "min-height", "max-width", "max-height",
     "selection-color", "selection-background", "highlight-color", "transition", "transition-duration",
     "transition-easing", "transition-timing-function", "icon-size", "icon-color", "icon-tint",
-    "track-height", "track-color", "track", "knob-color", "knob", "knob-width", "knob-w",
+    "knob-width", "knob-w",
     "knob-height", "knob-h", "check-color", "check", "item-padding", "menu-item-padding",
     "item-height", "menu-item-height", "appbar-btn-size", "appbar-btn-gap", "appbar-btn-top",
     "appbar-btn-right", "appbar-btn-close-color", "appbar-btn-min-color", "appbar-btn-max-color",

@@ -241,8 +241,6 @@ static void print_usage(FILE *out) {
     fprintf(out, "    YIS_<NAME>_BINDINGS Path to module bindings .inc file\n");
     fprintf(out, "    YIS_<NAME>_CFLAGS   Additional C flags for module compilation\n");
     fprintf(out, "    YIS_<NAME>_FLAGS    Additional linker flags for module\n");
-    fprintf(out, "    YIS_RAYLIB_CFLAGS   C flags for raylib (auto-detected on macOS/Linux)\n");
-    fprintf(out, "    YIS_RAYLIB_FLAGS    Linker flags for raylib (auto-detected on macOS/Linux)\n");
 }
 
 static void print_version(void) {
@@ -264,19 +262,6 @@ static const char *cc_flags(void) {
     return flags && flags[0] ? flags : "-O3 -std=c11 -pipe";
 }
 
-static const char *join_flags(char *buf, size_t cap, const char *a, const char *b) {
-    if (!(a && a[0])) {
-        snprintf(buf, cap, "%s", b && b[0] ? b : "");
-        return buf;
-    }
-    if (!(b && b[0])) {
-        snprintf(buf, cap, "%s", a);
-        return buf;
-    }
-    snprintf(buf, cap, "%s %s", a, b);
-    return buf;
-}
-
 // Get an env var for an external module: YIS_{NAME}_{suffix}
 static const char *get_module_env_val(const char *name, const char *suffix) {
     static char env_buf[256];
@@ -293,51 +278,6 @@ static const char *get_module_env_val(const char *name, const char *suffix) {
     const char *val = getenv(env_buf);
     return (val && val[0]) ? val : NULL;
 }
-
-#if defined(__APPLE__) || defined(__linux__)
-static const char *raylib_default_cflags(void) {
-#if defined(__APPLE__)
-    if (path_is_file("/opt/homebrew/include/raylib.h")) {
-        return "-I/opt/homebrew/include";
-    }
-    if (path_is_file("/usr/local/include/raylib.h")) {
-        return "-I/usr/local/include";
-    }
-#elif defined(__linux__)
-    if (path_is_file("/usr/include/raylib.h")) {
-        return "-I/usr/include";
-    }
-    if (path_is_file("/usr/local/include/raylib.h")) {
-        return "-I/usr/local/include";
-    }
-#endif
-    return "";
-}
-
-static const char *raylib_default_ldflags(void) {
-#if defined(_WIN32)
-    return "-lraylib -lopengl32 -lgdi32 -lwinmm";
-#elif defined(__APPLE__)
-    static char buf[512];
-    if (path_is_file("/opt/homebrew/lib/libraylib.dylib")) {
-        snprintf(buf, sizeof(buf),
-                 "-L/opt/homebrew/lib -lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo");
-        return buf;
-    }
-    if (path_is_file("/usr/local/lib/libraylib.dylib")) {
-        snprintf(buf, sizeof(buf),
-                 "-L/usr/local/lib -lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo");
-        return buf;
-    }
-    return "-lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo";
-#else
-    if (path_is_file("/usr/local/lib/libraylib.so")) {
-        return "-L/usr/local/lib -lraylib -lm -lpthread -ldl -lrt -lX11";
-    }
-    return "-lraylib -lm -lpthread -ldl -lrt -lX11";
-#endif
-}
-#endif
 
 // ============================================================
 // C compiler error translation: demangle C names → Yis names
@@ -846,31 +786,19 @@ int main(int argc, char **argv) {
 
         const char *extra_cflags = "";
         const char *extra_ldflags = "";
-        char extra_cflags_buf[2048] = {0};
-        char extra_ldflags_buf[2048] = {0};
         if (uses_ext_module) {
             // Module-specific cflags: YIS_<NAME>_CFLAGS or auto-detected
             const char *mod_cflags = get_module_env_val(ext_module_name, "CFLAGS");
             if (!mod_cflags) mod_cflags = module_default_cflags(ext_module_name);
 
-            const char *ray_cflags = getenv("YIS_RAYLIB_CFLAGS");
-            if (!(ray_cflags && ray_cflags[0])) {
-#if defined(__APPLE__) || defined(__linux__)
-                ray_cflags = raylib_default_cflags();
-#endif
-            }
-            extra_cflags = join_flags(extra_cflags_buf, sizeof(extra_cflags_buf), ray_cflags, mod_cflags);
+            extra_cflags = mod_cflags ? mod_cflags : "";
 
             // Module-specific ldflags: YIS_<NAME>_FLAGS or auto-detected
-            const char *ray_flags = getenv("YIS_RAYLIB_FLAGS");
             const char *mod_flags = get_module_env_val(ext_module_name, "FLAGS");
-            if (!(ray_flags && ray_flags[0])) {
-                ray_flags = raylib_default_ldflags();
-            }
             if (!mod_flags) {
                 mod_flags = module_default_ldflags(ext_module_name);
             }
-            extra_ldflags = join_flags(extra_ldflags_buf, sizeof(extra_ldflags_buf), mod_flags, ray_flags);
+            extra_ldflags = mod_flags ? mod_flags : "";
         }
 
         // Generate unique binary name from app id (if statically set) or entry file basename.
