@@ -5764,7 +5764,7 @@ entry() (( -- )) {
   }
 
   let disable_boot_fallback = env_nonempty("YIS_DISABLE_BOOTSTRAP_FALLBACK")
-  if !disable_boot_fallback && !is_self_host && !is_run_mode && contains_callback_lambda_arrow(source_raw) {
+  if !disable_boot_fallback && !is_self_host && !is_run_mode {
     let bootstrap_path = find_bootstrap_compiler(argv)
     if stdr.len(bootstrap_path) > 0 {
       let ?boot_cmd = shell_quote_arg(bootstrap_path)

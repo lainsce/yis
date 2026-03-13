@@ -1690,13 +1690,8 @@ static bool ensure_assignable(Arena *arena, Ty *expected, Ty *actual, Str path, 
         return ensure_assignable(arena, base_expected, base_actual, path, where, err);
     }
     if (ty_is_nullable(actual)) {
-        char ea[64];
-        char eb[64];
-        ty_desc(expected, ea, sizeof(ea));
-        ty_desc(actual, eb, sizeof(eb));
-        set_errf(err, path, 0, 0, "type mismatch%s%s (expected %s, got %s)",
-                 where && where[0] ? ": " : "", where ? where : "", ea, eb);
-        return false;
+        Ty *base_actual = ty_strip_nullable(actual);
+        return ensure_assignable(arena, expected, base_actual, path, where, err);
     }
     if (expected->tag == TY_ARRAY && actual->tag == TY_ARRAY) {
         return ensure_assignable(arena, expected->elem, actual->elem, path, where, err);
@@ -2590,7 +2585,7 @@ static bool is_mut_lvalue(Expr *e, Ctx *ctx, Locals *loc, GlobalEnv *env) {
 }
 
 static bool is_stdr_prelude(Str name) {
-    return str_eq_c(name, "write") || str_eq_c(name, "writef") || str_eq_c(name, "readf") || str_eq_c(name, "len") || str_eq_c(name, "slice") || str_eq_c(name, "concat") || str_eq_c(name, "str_concat") || str_eq_c(name, "char_code") || str_eq_c(name, "is_null") || str_eq_c(name, "str");
+    return str_eq_c(name, "write") || str_eq_c(name, "writef") || str_eq_c(name, "readf") || str_eq_c(name, "len") || str_eq_c(name, "slice") || str_eq_c(name, "concat") || str_eq_c(name, "str_concat") || str_eq_c(name, "char_code") || str_eq_c(name, "is_null") || str_eq_c(name, "str") || str_eq_c(name, "num");
 }
 
 static Ty *tc_expr_inner(Expr *e, Ctx *ctx, Locals *loc, GlobalEnv *env, Diag *err);
@@ -2867,6 +2862,50 @@ method_call:
                      (int)shadow.len, shadow.data);
             return NULL;
         }
+
+        /* Infix-call fallback: x !fn args  →  fn(x, args...) */
+        {
+            FunSig *sig = find_fun(env, ctx->cask_name, mname);
+            if (!sig && is_stdr_prelude(mname)) {
+                for (size_t i = 0; i < ctx->imports_len; i++) {
+                    if (str_eq_c(ctx->imports[i], "stdr")) {
+                        sig = find_fun(env, str_from_c("stdr"), mname);
+                        break;
+                    }
+                }
+            }
+            if (sig) {
+                size_t total = 1 + argc;
+                if (total != sig->params_len) {
+                    set_errf(err, ctx->cask_path, fn->line, fn->col, "%.*s: '%.*s' expects %zu args, got %zu",
+                             (int)ctx->cask_path.len, ctx->cask_path.data,
+                             (int)mname.len, mname.data, sig->params_len, total);
+                    return NULL;
+                }
+                Subst subst = subst_init();
+                if (!ensure_assignable(env->arena, sig->params[0], base_ty, ctx->cask_path, "arg", err)) {
+                    set_arg_diag(err, ctx, base);
+                    subst_free(&subst);
+                    return NULL;
+                }
+                unify(env->arena, sig->params[0], base_ty, ctx->cask_path, "arg", &subst, err);
+                if (err && err->message) { subst_free(&subst); return NULL; }
+                for (size_t i = 0; i < argc; i++) {
+                    Ty *at = tc_expr_inner(args[i], ctx, loc, env, err);
+                    if (!ensure_assignable(env->arena, sig->params[1 + i], at, ctx->cask_path, "arg", err)) {
+                        set_arg_diag(err, ctx, args[i]);
+                        subst_free(&subst);
+                        return NULL;
+                    }
+                    unify(env->arena, sig->params[1 + i], at, ctx->cask_path, "arg", &subst, err);
+                    if (err && err->message) { subst_free(&subst); return NULL; }
+                }
+                Ty *ret = ty_apply_subst(env->arena, sig->ret, &subst);
+                subst_free(&subst);
+                return ret;
+            }
+        }
+
         set_errf(err, ctx->cask_path, fn->line, fn->col, "%.*s: cannot call member on value", (int)ctx->cask_path.len, ctx->cask_path.data);
         return NULL;
     }

@@ -783,7 +783,7 @@ static ConstEntry *codegen_find_const(ModuleConsts *mc, Str name) {
 
 static bool is_stdr_prelude(Str name) {
     return str_eq_c(name, "write") || str_eq_c(name, "writef") || str_eq_c(name, "readf") ||
-           str_eq_c(name, "len") || str_eq_c(name, "slice") || str_eq_c(name, "concat") || str_eq_c(name, "char_code") || str_eq_c(name, "is_null") || str_eq_c(name, "str");
+           str_eq_c(name, "len") || str_eq_c(name, "slice") || str_eq_c(name, "concat") || str_eq_c(name, "char_code") || str_eq_c(name, "is_null") || str_eq_c(name, "str") || str_eq_c(name, "num");
 }
 
 static bool is_extern_stub_sig(FunSig *sig) {

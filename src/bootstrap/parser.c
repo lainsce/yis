@@ -322,22 +322,12 @@ static Expr *parse_interp_expr(Parser *p, Tok *owner, Str text) {
                 free(toks.data);
                 return NULL;
             }
-            Str index_text = { text.data + index_start, index_end - index_start };
 
-            // Parse the index as an expression
-            TokVec index_toks = {0};
-            Diag index_err = {0};
-            if (!lex_source(p->path, index_text.data, index_text.len, p->arena, &index_toks, &index_err)) {
-                parser_set_error(p, owner, "invalid interpolation '<%.*s>': bad index: %s", (int)text.len, text.data, index_err.message ? index_err.message : "lex error");
-                free(toks.data);
-                free(index_toks.data);
-                return NULL;
-            }
-
+            // Use the already-lexed tokens directly instead of re-lexing
             Parser sub;
             memset(&sub, 0, sizeof(sub));
-            sub.toks = index_toks.data;
-            sub.len = index_toks.len;
+            sub.toks = &toks.data[index_start];
+            sub.len = index_end - index_start;
             sub.path = p->path;
             sub.arena = p->arena;
             sub.err = NULL;
@@ -347,10 +337,8 @@ static Expr *parse_interp_expr(Parser *p, Tok *owner, Str text) {
             if (!sub.ok || !idx) {
                 parser_set_error(p, owner, "invalid interpolation '<%.*s>': invalid index expression", (int)text.len, text.data);
                 free(toks.data);
-                free(index_toks.data);
                 return NULL;
             }
-            free(index_toks.data);
 
             Expr *index_expr = new_expr(p, EXPR_INDEX, owner);
             if (!index_expr) {
@@ -1234,6 +1222,7 @@ static Expr *parse_postfix(Parser *p) {
             bool has_arg =
                 nk != TOK_SEMI &&
                 nk != TOK_EOF &&
+                nk != TOK_LBRACE &&
                 nk != TOK_RBRACE &&
                 nk != TOK_RPAR &&
                 nk != TOK_RBRACK &&
