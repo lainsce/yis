@@ -78,13 +78,23 @@ macro is_none() (( bool )) {
 
 -- Join an array of values into a string
 :: join(arr = any) (( string )) {
-  let ?out = ""
+  let ?len = __len(arr)
+  if len == 0 { return "" }
+  if len == 1 { return str(arr[0]) }
+  let ?a = []: [any]
   let ?i = 0
-  let n = len(arr)
-  for (; i < n; i = i + 1) {
-    out = str_concat(out, str(arr[i]))
+  for (; i < len; i = i + 1) { push(a, str(arr[i])) }
+  for (; len > 1; ) {
+    let ?j = 0
+    let ?k = 0
+    for (; j + 1 < len; j = j + 2) {
+      a[k] = str_concat(a[j], a[j + 1])
+      k = k + 1
+    }
+    if j < len { a[k] = a[j]; k = k + 1 }
+    len = k
   }
-  return out
+  return a[0]
 }
 
 -- Push a value onto the end of an array in-place

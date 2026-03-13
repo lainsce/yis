@@ -75,13 +75,23 @@ def ?g_last_line_num = 0
 }
 
 : join_parts(parts = any) (( string )) {
-  let ?out = ""
+  let ?len = stdr.len(parts)
+  if len == 0 { return "" }
+  if len == 1 { return stdr.str(parts[0]) }
+  let ?arr = []: [any]
   let ?i = 0
-  let n = stdr.len(parts)
-  for (; i < n; i = i + 1) {
-    out = stdr.str_concat(out, stdr.str(parts[i]))
+  for (; i < len; i = i + 1) { stdr.push(arr, stdr.str(parts[i])) }
+  for (; len > 1; ) {
+    let ?j = 0
+    let ?k = 0
+    for (; j + 1 < len; j = j + 2) {
+      arr[k] = stdr.str_concat(arr[j], arr[j + 1])
+      k = k + 1
+    }
+    if j < len { arr[k] = arr[j]; k = k + 1 }
+    len = k
   }
-  return out
+  return arr[0]
 }
 
 : pair(a = any, b = any) (( any )) {
@@ -134,47 +144,44 @@ def ?g_last_line_num = 0
 
 : _c_quote(text = string) (( string )) {
   let hex = "0123456789ABCDEF"
-  let ?q = "\""
+  let ?parts = []: [any]
+  stdr.push(parts, "\"")
   let n = stdr.len(text)
+  let ?chunk_start = 0
   let ?i = 0
   for (; i < n; i = i + 1) {
-    let c = stdr.slice(text, i, i + 1)
-    let code = stdr.char_code(c)
-    if code == 10 {
-      q = stdr.str_concat(q, "\\n")
-    } elif code == 9 {
-      q = stdr.str_concat(q, "\\t")
-    } elif code == 13 {
-      q = stdr.str_concat(q, "\\r")
-    } elif code == 7 {
-      q = stdr.str_concat(q, "\\a")
-    } elif code == 8 {
-      q = stdr.str_concat(q, "\\b")
-    } elif code == 11 {
-      q = stdr.str_concat(q, "\\v")
-    } elif code == 12 {
-      q = stdr.str_concat(q, "\\f")
-    } elif code == 27 {
-      q = stdr.str_concat(q, "\\x1B")
-    } elif code < 32 || code == 127 {
-      let ?hi = 0
-      let ?lo = code
-      for (; lo >= 16; ) {
-        hi = hi + 1
-        lo = lo - 16
-      }
-      q = stdr.str_concat(q, "\\x")
-      q = stdr.str_concat(q, stdr.slice(hex, hi, hi + 1))
-      q = stdr.str_concat(q, stdr.slice(hex, lo, lo + 1))
-    } else {
-      if c == "\\" || c == "\"" {
-        q = stdr.str_concat(q, "\\")
-      }
-      q = stdr.str_concat(q, c)
+    let code = stdr.char_code(stdr.slice(text, i, i + 1))
+    let ?esc = ""
+    if code == 10 { esc = "\\n" }
+    elif code == 9 { esc = "\\t" }
+    elif code == 13 { esc = "\\r" }
+    elif code == 7 { esc = "\\a" }
+    elif code == 8 { esc = "\\b" }
+    elif code == 11 { esc = "\\v" }
+    elif code == 12 { esc = "\\f" }
+    elif code == 27 { esc = "\\x1B" }
+    elif code < 32 || code == 127 {
+      let hi = code / 16
+      let lo = code - hi * 16
+      let ?hx = "\\x"
+      hx = stdr.str_concat(hx, stdr.slice(hex, hi, hi + 1))
+      hx = stdr.str_concat(hx, stdr.slice(hex, lo, lo + 1))
+      esc = hx
+    } elif code == 92 || code == 34 {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      stdr.push(parts, "\\")
+      chunk_start = i
+      continue
+    }
+    if stdr.len(esc) > 0 {
+      if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
+      stdr.push(parts, esc)
+      chunk_start = i + 1
     }
   }
-  q = stdr.str_concat(q, "\"")
-  return q
+  if chunk_start < n { stdr.push(parts, stdr.slice(text, chunk_start, n)) }
+  stdr.push(parts, "\"")
+  return join_parts(parts)
 }
 
 : _trim(text = string) (( string )) {
@@ -670,40 +677,19 @@ def ?g_last_line_num = 0
 }
 
 : str_to_upper(text = string) (( string )) {
-  let ?out = ""
-  let ?i = 0
   let n = stdr.len(text)
+  if n == 0 { return "" }
+  let ?parts = []: [any]
+  let ?i = 0
   for (; i < n; i = i + 1) {
-    let ch = stdr.slice(text, i, i + 1)
-    if ch == "a" { out = stdr.str_concat(out, "A") }
-    elif ch == "b" { out = stdr.str_concat(out, "B") }
-    elif ch == "c" { out = stdr.str_concat(out, "C") }
-    elif ch == "d" { out = stdr.str_concat(out, "D") }
-    elif ch == "e" { out = stdr.str_concat(out, "E") }
-    elif ch == "f" { out = stdr.str_concat(out, "F") }
-    elif ch == "g" { out = stdr.str_concat(out, "G") }
-    elif ch == "h" { out = stdr.str_concat(out, "H") }
-    elif ch == "i" { out = stdr.str_concat(out, "I") }
-    elif ch == "j" { out = stdr.str_concat(out, "J") }
-    elif ch == "k" { out = stdr.str_concat(out, "K") }
-    elif ch == "l" { out = stdr.str_concat(out, "L") }
-    elif ch == "m" { out = stdr.str_concat(out, "M") }
-    elif ch == "n" { out = stdr.str_concat(out, "N") }
-    elif ch == "o" { out = stdr.str_concat(out, "O") }
-    elif ch == "p" { out = stdr.str_concat(out, "P") }
-    elif ch == "q" { out = stdr.str_concat(out, "Q") }
-    elif ch == "r" { out = stdr.str_concat(out, "R") }
-    elif ch == "s" { out = stdr.str_concat(out, "S") }
-    elif ch == "t" { out = stdr.str_concat(out, "T") }
-    elif ch == "u" { out = stdr.str_concat(out, "U") }
-    elif ch == "v" { out = stdr.str_concat(out, "V") }
-    elif ch == "w" { out = stdr.str_concat(out, "W") }
-    elif ch == "x" { out = stdr.str_concat(out, "X") }
-    elif ch == "y" { out = stdr.str_concat(out, "Y") }
-    elif ch == "z" { out = stdr.str_concat(out, "Z") }
-    else { out = stdr.str_concat(out, ch) }
+    let code = stdr.char_code(stdr.slice(text, i, i + 1))
+    if code >= 97 && code <= 122 {
+      stdr.push(parts, stdr.char_from_code(code - 32))
+    } else {
+      stdr.push(parts, stdr.slice(text, i, i + 1))
+    }
   }
-  return out
+  return join_parts(parts)
 }
 
 : is_capture_excluded(name = string) (( bool )) {
@@ -2159,13 +2145,14 @@ def ?g_last_line_num = 0
 : emit_args(args = any, r = string, cask_name = string) (( string )) {
   let ?n = 0
   n = stdr.len(args)
-  let ?out = r
+  let ?parts = []: [any]
+  stdr.push(parts, r)
   let ?k = 0
   for (; k < n; k = k + 1) {
-    if k > 0 { out = stdr.str_concat(out, ", ") }
-    out = stdr.str_concat(out, emit_expr(args[k], cask_name))
+    if k > 0 { stdr.push(parts, ", ") }
+    stdr.push(parts, emit_expr(args[k], cask_name))
   }
-  return out
+  return join_parts(parts)
 }
 
 -- Helper: call a function value expression via runtime yis_call.
@@ -2173,28 +2160,30 @@ def ?g_last_line_num = 0
   let ?n = 0
   n = stdr.len(args)
   if n == 0 {
-    let ?r0 = "yis_call("
-    r0 = stdr.str_concat(r0, func_expr)
-    r0 = stdr.str_concat(r0, ", 0, NULL)")
-    return r0
+    let ?parts0 = []: [any]
+    stdr.push(parts0, "yis_call(")
+    stdr.push(parts0, func_expr)
+    stdr.push(parts0, ", 0, NULL)")
+    return join_parts(parts0)
   }
-  let ?r = "({ YisVal __argv["
-  r = stdr.str_concat(r, stdr.str(n))
-  r = stdr.str_concat(r, "]; ")
+  let ?parts = []: [any]
+  stdr.push(parts, "({ YisVal __argv[")
+  stdr.push(parts, stdr.str(n))
+  stdr.push(parts, "]; ")
   let ?k = 0
   for (; k < n; k = k + 1) {
-    r = stdr.str_concat(r, "__argv[")
-    r = stdr.str_concat(r, stdr.str(k))
-    r = stdr.str_concat(r, "] = ")
-    r = stdr.str_concat(r, emit_expr(args[k], cask_name))
-    r = stdr.str_concat(r, "; ")
+    stdr.push(parts, "__argv[")
+    stdr.push(parts, stdr.str(k))
+    stdr.push(parts, "] = ")
+    stdr.push(parts, emit_expr(args[k], cask_name))
+    stdr.push(parts, "; ")
   }
-  r = stdr.str_concat(r, "yis_call(")
-  r = stdr.str_concat(r, func_expr)
-  r = stdr.str_concat(r, ", ")
-  r = stdr.str_concat(r, stdr.str(n))
-  r = stdr.str_concat(r, ", __argv); })")
-  return r
+  stdr.push(parts, "yis_call(")
+  stdr.push(parts, func_expr)
+  stdr.push(parts, ", ")
+  stdr.push(parts, stdr.str(n))
+  stdr.push(parts, ", __argv); })")
+  return join_parts(parts)
 }
 
 -- Emit C statements from a list of stmt AST nodes.
@@ -3255,18 +3244,15 @@ def ?g_last_line_num = 0
 
 : strip_line_comments(src = string) (( string )) {
   let n = stdr.len(src)
-  let ?out = ""
+  let ?parts = []: [any]
+  let ?chunk_start = 0
   let ?i = 0
   let ?in_str = false
   for (; i < n; i = i + 1) {
     let c = stdr.slice(src, i, i + 1)
     if in_str {
-      out = stdr.str_concat(out, c)
       if c == "\\" {
-        if i + 1 < n {
-          out = stdr.str_concat(out, stdr.slice(src, i + 1, i + 2))
-          i = i + 1
-        }
+        i = i + 1
       } elif c == "\"" {
         in_str = false
       }
@@ -3275,12 +3261,10 @@ def ?g_last_line_num = 0
 
     if c == "\"" {
       in_str = true
-      out = stdr.str_concat(out, c)
       continue
     }
 
     if c == "-" && i + 1 < n && stdr.slice(src, i + 1, i + 2) == "-" {
-      -- Preserve return type marker: (( -- ))
       let ?lp1 = -1
       let ?lp2 = -1
       let ?p = i - 1
@@ -3317,42 +3301,39 @@ def ?g_last_line_num = 0
 
       if lp2 >= 0 && lp1 >= 0 && rp1 >= 0 && rp2 >= 0 {
         if stdr.slice(src, lp2, lp2 + 1) == "(" && stdr.slice(src, lp1, lp1 + 1) == "(" && stdr.slice(src, rp1, rp1 + 1) == ")" && stdr.slice(src, rp2, rp2 + 1) == ")" {
-          out = stdr.str_concat(out, "--")
           i = i + 1
           continue
         }
       }
 
+      if chunk_start < i { stdr.push(parts, stdr.slice(src, chunk_start, i)) }
       i = i + 2
       for (; i < n; i = i + 1) {
         let d = stdr.slice(src, i, i + 1)
         if d == "\n" {
-          out = stdr.str_concat(out, "\n")
+          stdr.push(parts, "\n")
           break
         }
       }
+      chunk_start = i + 1
       continue
     }
-
-    out = stdr.str_concat(out, c)
   }
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(src, chunk_start, n)) }
+  return join_parts(parts)
 }
 
 : normalize_typed_lambda_params(src = string) (( string )) {
   let n = stdr.len(src)
-  let ?out = ""
+  let ?parts = []: [any]
+  let ?chunk_start = 0
   let ?i = 0
   let ?in_str = false
   for (; i < n; i = i + 1) {
     let c = stdr.slice(src, i, i + 1)
     if in_str {
-      out = stdr.str_concat(out, c)
       if c == "\\" {
-        if i + 1 < n {
-          out = stdr.str_concat(out, stdr.slice(src, i + 1, i + 2))
-          i = i + 1
-        }
+        i = i + 1
       } elif c == "\"" {
         in_str = false
       }
@@ -3360,7 +3341,6 @@ def ?g_last_line_num = 0
     }
     if c == "\"" {
       in_str = true
-      out = stdr.str_concat(out, c)
       continue
     }
 
@@ -3371,7 +3351,6 @@ def ?g_last_line_num = 0
       for (; j < n; j = j + 1) {
         let d = stdr.slice(src, j, j + 1)
         if d == "\"" {
-          -- simple skip quoted text while scanning param segment
           j = j + 1
           for (; j < n; j = j + 1) {
             let q = stdr.slice(src, j, j + 1)
@@ -3399,19 +3378,20 @@ def ?g_last_line_num = 0
           let comma = str_find(inside, ",")
           if eq > 0 && comma < 0 {
             let lhs = trim_ws(stdr.slice(inside, 0, eq))
-            out = stdr.str_concat(out, "(")
-            out = stdr.str_concat(out, lhs)
-            out = stdr.str_concat(out, ")")
+            if chunk_start < i { stdr.push(parts, stdr.slice(src, chunk_start, i)) }
+            stdr.push(parts, "(")
+            stdr.push(parts, lhs)
+            stdr.push(parts, ")")
+            chunk_start = j + 1
             i = j
             continue
           }
         }
       }
     }
-
-    out = stdr.str_concat(out, c)
   }
-  return out
+  if chunk_start < n { stdr.push(parts, stdr.slice(src, chunk_start, n)) }
+  return join_parts(parts)
 }
 
 : preprocess_source(src = string) (( string )) {
@@ -3438,18 +3418,22 @@ def ?g_last_line_num = 0
 }
 
 : shell_quote_arg(arg = string) (( string )) {
-  let ?q = "\""
+  let ?parts = []: [any]
+  stdr.push(parts, "\"")
   let n = stdr.len(arg)
+  let ?chunk_start = 0
   let ?i = 0
   for (; i < n; i = i + 1) {
     let c = stdr.slice(arg, i, i + 1)
     if c == "\\" || c == "\"" {
-      q = stdr.str_concat(q, "\\")
+      if chunk_start < i { stdr.push(parts, stdr.slice(arg, chunk_start, i)) }
+      stdr.push(parts, "\\")
+      chunk_start = i
     }
-    q = stdr.str_concat(q, c)
   }
-  q = stdr.str_concat(q, "\"")
-  return q
+  if chunk_start < n { stdr.push(parts, stdr.slice(arg, chunk_start, n)) }
+  stdr.push(parts, "\"")
+  return join_parts(parts)
 }
 
 : find_bootstrap_compiler(argv = any) (( string )) {
@@ -5287,14 +5271,15 @@ def ?g_last_line_num = 0
   g_last_line_num = 0
   let mod_c = emit_unit(mod_ast)
   g_emit_file_path = saved_path
-  let ?out = "\n/* begin embedded module: "
-  out = stdr.str_concat(out, bname)
-  out = stdr.str_concat(out, " */\n")
-  out = stdr.str_concat(out, mod_c)
-  out = stdr.str_concat(out, "/* end embedded module: ")
-  out = stdr.str_concat(out, bname)
-  out = stdr.str_concat(out, " */\n")
-  return out
+  let ?parts = []: [any]
+  stdr.push(parts, "\n/* begin embedded module: ")
+  stdr.push(parts, bname)
+  stdr.push(parts, " */\n")
+  stdr.push(parts, mod_c)
+  stdr.push(parts, "/* end embedded module: ")
+  stdr.push(parts, bname)
+  stdr.push(parts, " */\n")
+  return join_parts(parts)
 }
 
 -- Collect all bring names from a decl list (non-builtin)
