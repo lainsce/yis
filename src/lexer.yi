@@ -480,7 +480,7 @@ bring stdr
             let tvk = "val"
             tp[tkk] = "text"
             tp[tvk] = stdr.slice(source, seg_start, j)
-            parts = stdr.concat(parts, [tp])
+            stdr.push(parts, tp)
           }
           let ?vstart = j + 2
           let ?vend = vstart
@@ -495,7 +495,7 @@ bring stdr
           let evk = "val"
           ep[ekk] = "expr"
           ep[evk] = stdr.slice(source, vstart, vend)
-          parts = stdr.concat(parts, [ep])
+          stdr.push(parts, ep)
           if vend + 1 < n && stdr.slice(source, vend, vend + 1) == "$" && stdr.slice(source, vend + 1, vend + 2) == "$" {
             j = vend + 2
           } else {
@@ -513,7 +513,7 @@ bring stdr
         let tvk = "val"
         tp[tkk] = "text"
         tp[tvk] = stdr.slice(source, seg_start, j)
-        parts = stdr.concat(parts, [tp])
+        stdr.push(parts, tp)
       }
       let ?t_interp = tok("str_interp", line, col, "", 0, "")
       let partsk = "parts"
@@ -546,7 +546,7 @@ bring stdr
           let tvk = "val"
           tp[tkk] = "text"
           tp[tvk] = seg
-          parts = stdr.concat(parts, [tp])
+          stdr.push(parts, tp)
         }
         let ?vstart = j + 2
         let ?vend = vstart
@@ -561,7 +561,7 @@ bring stdr
         let evk = "val"
         ep[ekk] = "expr"
         ep[evk] = stdr.slice(source, vstart, vend)
-        parts = stdr.concat(parts, [ep])
+        stdr.push(parts, ep)
         if vend + 1 < n && stdr.slice(source, vend, vend + 1) == "$" && stdr.slice(source, vend + 1, vend + 2) == "$" {
           j = vend + 2
         } else {
@@ -581,7 +581,7 @@ bring stdr
       let tvk = "val"
       tp[tkk] = "text"
       tp[tvk] = seg_final
-      parts = stdr.concat(parts, [tp])
+      stdr.push(parts, tp)
     }
     let ?t_interp = tok("str_interp", line, col, "", 0, "")
     let partsk = "parts"
@@ -622,7 +622,7 @@ bring stdr
     if tk == "lpar" && last_kind == "lpar" { ret_depth = ret_depth + 1 }
     if tk == "rpar" && last_kind == "rpar" && ret_depth > 0 { ret_depth = ret_depth - 1 }
     last_kind = tk
-    cur_acc = stdr.concat(cur_acc, [t])
+    stdr.push(cur_acc, t)
     if next_i >= n { return cur_acc }
     if tk == "eof" { return cur_acc }
     cur_i = next_i

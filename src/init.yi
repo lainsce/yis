@@ -66,10 +66,8 @@ def ?g_last_line_num = 0
 }
 
 : dict_get_or(d = any, k = any, fallback = any) (( any )) {
-  if stdr.str(d) != "[dict]" { return fallback }
-  let ?ks = stdr.str(k ?? "")
-  if stdr.is_null(ks) { ks = "" }
-  let v = d[ks]
+  if stdr.is_null(d) { return fallback }
+  let v = d[k ?? ""]
   if stdr.is_null(v) { return fallback }
   return v
 }
@@ -710,7 +708,8 @@ def ?g_last_line_num = 0
 
 : arr_add_unique(xs = any, v = any) (( any )) {
   if arr_contains(xs, v) { return xs }
-  return stdr.concat(xs, [v])
+  stdr.push(xs, v)
+  return xs
 }
 
 : scope_mark(name = string) (( -- )) {
@@ -944,7 +943,7 @@ def ?g_last_line_num = 0
     if is_capture_excluded(name) { continue }
     if g_global_def_names[name] { continue }
     if stdr.is_null(g_scope_names[name]) { continue }
-    caps = stdr.concat(caps, [name])
+    stdr.push(caps, name)
   }
   return caps
 }
@@ -985,7 +984,7 @@ def ?g_last_line_num = 0
   meta["cap_types"] = cap_types
   meta["cask"] = cask_name
   g_lambda_meta[key] = meta
-  g_lambda_ids = stdr.concat(g_lambda_ids, [id])
+  stdr.push(g_lambda_ids, id)
   return meta
 }
 
@@ -1140,7 +1139,7 @@ def ?g_last_line_num = 0
         }
         if stdr.len(vtype) > 0 {
           let cls_info = g_classes[vtype]
-          if !stdr.is_null(cls_info) && stdr.str(cls_info) == "[dict]" {
+          if !stdr.is_null(cls_info) {
             let cls_mod = dict_get_or(cls_info, "mod", "") ?? ""
             if stdr.len(cls_mod) > 0 {
               let ?mkey = cls_mod
@@ -1665,10 +1664,9 @@ def ?g_last_line_num = 0
     let obj_raw = e[ok]
     let field = e[fk] ?? ""
     -- Check if this is a brought-module constant access (e.g., gst.EVENT_EOS)
-    let ?mem_obj_tag = stdr.str(dict_get_or(obj_raw, "tag", "") ?? "")
-    if stdr.is_null(mem_obj_tag) { mem_obj_tag = "" }
+    let mem_obj_tag = dict_get_or(obj_raw, "tag", "") ?? ""
     if mem_obj_tag == "ident" {
-      let mem_obj_name = stdr.str(dict_get_or(obj_raw, "name", "") ?? "")
+      let mem_obj_name = dict_get_or(obj_raw, "name", "") ?? ""
       if !stdr.is_null(g_bring_names[mem_obj_name]) && mem_obj_name != cask_name {
         let ?r = "v_"
         r = stdr.str_concat(r, field)
@@ -1873,15 +1871,12 @@ def ?g_last_line_num = 0
 -- Helper: emit member call with fallback for unary-wrapped receiver.
 : emit_member_call(member_func = any, args = any, cask_name = string) (( string )) {
   let obj = dict_get_or(member_func, "obj", null)
-  let ?field = stdr.str(dict_get_or(member_func, "field", "") ?? "")
-  if stdr.is_null(field) { field = "" }
+  let field = dict_get_or(member_func, "field", "") ?? ""
 
-  let ?obj_tag = stdr.str(dict_get_or(obj, "tag", "") ?? "")
-  if stdr.is_null(obj_tag) { obj_tag = "" }
+  let obj_tag = dict_get_or(obj, "tag", "") ?? ""
 
   if obj_tag == "ident" {
-    let ?obj_name = stdr.str(dict_get_or(obj, "name", "") ?? "")
-    if stdr.is_null(obj_name) { obj_name = "" }
+    let obj_name = dict_get_or(obj, "name", "") ?? ""
 
     if obj_name == "stdr" {
       if field == "str" {
@@ -2081,10 +2076,8 @@ def ?g_last_line_num = 0
   let expr_type = type_of_expr(obj, cask_name)
   if stdr.len(expr_type) > 0 {
     let cls_info = dict_get_or(g_classes, expr_type, null)
-    if !stdr.is_null(cls_info) && stdr.str(cls_info) == "[dict]" {
-      let cls_mod_any = dict_get_or(cls_info, "mod", "")
-      let ?cls_mod = stdr.str(cls_mod_any ?? "")
-      if stdr.is_null(cls_mod) { cls_mod = "" }
+    if !stdr.is_null(cls_info) {
+      let cls_mod = dict_get_or(cls_info, "mod", "") ?? ""
 
       let cls_methods = dict_get_or(cls_info, "methods", null)
       if !stdr.is_null(dict_get_or(cls_methods, field, null)) {
@@ -2893,8 +2886,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "fun" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "fun" {
       let fname = d[name_key] ?? ""
       if !stdr.is_null(seen_fun_decls[fname]) { continue }
       seen_fun_decls[fname] = true
@@ -2925,8 +2919,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "macro" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "macro" {
       let mname = d[name_key] ?? ""
       if !stdr.is_null(fun_names[mname]) { continue }
       let ret = d[ret_key] ?? "any"
@@ -2947,8 +2942,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "class" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "class" {
       let cls_name = d[name_key] ?? ""
       let methods = d[methods_key] ?? []: [any]
       let ?mi = 0
@@ -2979,8 +2975,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "fun" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "fun" {
       let fname = d[name_key] ?? ""
       if !stdr.is_null(seen_fnwrap_decls[fname]) { continue }
       seen_fnwrap_decls[fname] = true
@@ -3006,8 +3003,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "def" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "def" {
       let dname = d[name_key] ?? ""
       g_global_def_names[dname] = true
       let dinit = d[init_key]
@@ -3029,18 +3027,19 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" {
       cask_name = d[name_key] ?? "init"
       stdr.push(p, "// cask ")
       stdr.push(p, d[name_key] ?? "")
       stdr.push(p, "\n")
     }
-    if d[tag] == "bring" {
+    if dt == "bring" {
       stdr.push(p, "// bring ")
       stdr.push(p, d[name_key] ?? "")
       stdr.push(p, "\n")
     }
-    if d[tag] == "fun" {
+    if dt == "fun" {
       let fname = d[name_key] ?? ""
       if !stdr.is_null(seen_fun_bodies[fname]) { continue }
       seen_fun_bodies[fname] = true
@@ -3052,12 +3051,12 @@ def ?g_last_line_num = 0
       }
       stdr.push(p, emit_fun(d, cask_name))
     }
-    if d[tag] == "macro" {
+    if dt == "macro" {
       let mname = d[name_key] ?? ""
       if !stdr.is_null(fun_names[mname]) { continue }
       stdr.push(p, emit_macro(d, cask_name))
     }
-    if d[tag] == "class" {
+    if dt == "class" {
       let cls_name = d[name_key] ?? ""
       let cls_methods = d[methods_key] ?? []: [any]
       let ?ci = 0
@@ -3074,8 +3073,9 @@ def ?g_last_line_num = 0
   i = 0
   for (; i < n; i = i + 1) {
     let d = decls[i]
-    if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-    if d[tag] == "fun" {
+    let dt = d[tag] ?? ""
+    if dt == "cask" { cask_name = d[name_key] ?? "init" }
+    if dt == "fun" {
       let fname = d[name_key] ?? ""
       if !stdr.is_null(seen_fnwrap_bodies[fname]) { continue }
       seen_fnwrap_bodies[fname] = true
@@ -3108,8 +3108,9 @@ def ?g_last_line_num = 0
     i = 0
     for (; i < n; i = i + 1) {
       let d = decls[i]
-      if d[tag] == "cask" { cask_name = d[name_key] ?? "init" }
-      if d[tag] == "def" {
+      let dt = d[tag] ?? ""
+      if dt == "cask" { cask_name = d[name_key] ?? "init" }
+      if dt == "def" {
         let dname = d[name_key] ?? ""
         let dinit = d[init_key]
         if !stdr.is_null(dinit) {
@@ -4492,61 +4493,35 @@ def ?g_last_line_num = 0
 }
 
 : env_new() (( any )) {
-  return []: [any]
+  return []: [string => any]
 }
 
 : env_clone(env = any) (( any )) {
-  let ?out = []: [any]
+  let ?out = []: [string => any]
+  let ks = stdr.keys(env)
   let ?i = 0
-  let n = stdr.len(env)
+  let n = stdr.len(ks)
   for (; i < n; i = i + 1) {
-    out = stdr.concat(out, [env[i]])
+    let k = ks[i] ?? ""
+    out[k] = env[k]
   }
   return out
 }
 
 : env_get(env = any, name = string) (( any )) {
-  let ?i = 0
-  let n = stdr.len(env)
-  for (; i < n; i = i + 1) {
-    let it = env[i]
-    let iname = it["name"] ?? ""
-    if iname == name {
-      return it["value"]
-    }
-  }
-  return null
+  return env[name]
 }
 
 : env_set(env = any, name = string, value = any) (( any )) {
-  let ?out = []: [any]
-  let ?found = false
-  let ?i = 0
-  let n = stdr.len(env)
-  for (; i < n; i = i + 1) {
-    let it = env[i]
-    let iname = it["name"] ?? ""
-    if iname == name {
-      let ?it2 = []: [string => any]
-      it2["name"] = name
-      it2["value"] = value
-      out = stdr.concat(out, [it2])
-      found = true
-    } else {
-      out = stdr.concat(out, [it])
-    }
-  }
-  if !found {
-    let ?it3 = []: [string => any]
-    it3["name"] = name
-    it3["value"] = value
-    out = stdr.concat(out, [it3])
-  }
+  let ?out = env_clone(env)
+  out[name] = value
   return out
 }
 
 : env_kill(env = any, name = string) (( any )) {
-  return env_set(env, name, null)
+  let ?out = env_clone(env)
+  out[name] = null
+  return out
 }
 
 : expr_size(e = any) (( num )) {
@@ -4641,7 +4616,7 @@ def ?g_last_line_num = 0
     let ?out = []: [any]
     let ?i = 0
     let an = stdr.len(args)
-    for (; i < an; i = i + 1) { out = stdr.concat(out, [subst_expr(args[i], binds)]) }
+    for (; i < an; i = i + 1) { stdr.push(out, subst_expr(args[i], binds)) }
     n["args"] = out
     return n
   }
@@ -4664,7 +4639,7 @@ def ?g_last_line_num = 0
     let ?out = []: [any]
     let ?i = 0
     let n = stdr.len(xs)
-    for (; i < n; i = i + 1) { out = stdr.concat(out, [subst_expr(xs[i], binds)]) }
+    for (; i < n; i = i + 1) { stdr.push(out, subst_expr(xs[i], binds)) }
     let ?r = []: [string => any]
     r["tag"] = "array"
     r["elems"] = out
@@ -4680,7 +4655,7 @@ def ?g_last_line_num = 0
       let ?u = []: [string => any]
       u["key"] = subst_expr(it["key"], binds)
       u["value"] = subst_expr(it["value"], binds)
-      out = stdr.concat(out, [u])
+      stdr.push(out, u)
     }
     let ?r = []: [string => any]
     r["tag"] = "dict"
@@ -4831,7 +4806,7 @@ def ?g_last_line_num = 0
     let ?out_args = []: [any]
     let ?i = 0
     let an = stdr.len(args)
-    for (; i < an; i = i + 1) { out_args = stdr.concat(out_args, [opt_expr(args[i], env)]) }
+    for (; i < an; i = i + 1) { stdr.push(out_args, opt_expr(args[i], env)) }
 
     -- Phase 3: selective small-function inlining
     let fnt = fn["tag"] ?? ""
@@ -4931,7 +4906,7 @@ def ?g_last_line_num = 0
     let ?out = []: [any]
     let ?i = 0
     let n = stdr.len(xs)
-    for (; i < n; i = i + 1) { out = stdr.concat(out, [opt_expr(xs[i], env)]) }
+    for (; i < n; i = i + 1) { stdr.push(out, opt_expr(xs[i], env)) }
     let ?r = []: [string => any]
     r["tag"] = "array"
     r["elems"] = out
@@ -4948,7 +4923,7 @@ def ?g_last_line_num = 0
       let ?u = []: [string => any]
       u["key"] = opt_expr(it["key"], env)
       u["value"] = opt_expr(it["value"], env)
-      out = stdr.concat(out, [u])
+      stdr.push(out, u)
     }
     let ?r = []: [string => any]
     r["tag"] = "dict"
@@ -5088,14 +5063,14 @@ def ?g_last_line_num = 0
       if !stdr.is_null(init_s) {
         let oi = opt_stmt(init_s, env)
         let os = oi[0]
-        if !stdr.is_null(os) { pre = stdr.concat(pre, [os]) }
+        if !stdr.is_null(os) { stdr.push(pre, os) }
       } elif !stdr.is_null(init_e) {
         let ie = opt_expr(init_e, env)
         if expr_has_side_effect(ie) {
           let ?es = []: [string => any]
           es["tag"] = "expr_stmt"
           es["expr"] = ie
-          pre = stdr.concat(pre, [es])
+          stdr.push(pre, es)
         }
       }
       return pair(splice_node(pre), env)
@@ -5150,13 +5125,13 @@ def ?g_last_line_num = 0
       let xn = stdr.len(xs)
       for (; k < xn; k = k + 1) {
         let z = xs[k]
-        if !stdr.is_null(z) { out = stdr.concat(out, [z]) }
+        if !stdr.is_null(z) { stdr.push(out, z) }
         let zt = z["tag"] ?? ""
         if zt == "return" || zt == "break" || zt == "continue" { return out }
       }
       continue
     }
-    out = stdr.concat(out, [os])
+    stdr.push(out, os)
     if ot == "return" || ot == "break" || ot == "continue" { return out }
   }
   return out
@@ -5217,7 +5192,7 @@ def ?g_last_line_num = 0
       } else {
         m["body"] = m_opt_body
       }
-      out = stdr.concat(out, [m])
+      stdr.push(out, m)
     }
     n["methods"] = out
     return n
@@ -5237,7 +5212,7 @@ def ?g_last_line_num = 0
   let ?i = 0
   let n = stdr.len(decls)
   for (; i < n; i = i + 1) {
-    out = stdr.concat(out, [opt_decl(decls[i])])
+    stdr.push(out, opt_decl(decls[i]))
   }
   let ?p = []: [string => any]
   p["tag"] = ast["tag"] ?? "program"
@@ -5314,11 +5289,11 @@ def ?g_last_line_num = 0
             if sub_name == "math" || is_external_module(sub_name) { continue }
             if !stdr.is_null(seen[sub_name]) { continue }
             seen[sub_name] = true
-            result = stdr.concat(result, [[sub_name, mod_dir]])
+            stdr.push(result, [sub_name, mod_dir])
           }
         }
       }
-      result = stdr.concat(result, [[bname, src_dir]])
+      stdr.push(result, [bname, src_dir])
     }
   }
   return result
@@ -5626,7 +5601,7 @@ def ?g_last_line_num = 0
         let md = mod_ast4[decls_key] ?? []: [any]
         let di = collect_def_inits(md)
         if di["has_defs"] {
-          init_calls = stdr.concat(init_calls, [di["cask"] ?? bname])
+          stdr.push(init_calls, di["cask"] ?? bname)
         }
       }
     }
@@ -5634,7 +5609,7 @@ def ?g_last_line_num = 0
   -- Check main unit for defs
   let main_di = collect_def_inits(decls)
   if main_di["has_defs"] {
-    init_calls = stdr.concat(init_calls, [main_di["cask"] ?? "init"])
+    stdr.push(init_calls, main_di["cask"] ?? "init")
   }
 
   stdr.push(p, "int main(int argc, char **argv) {\n")

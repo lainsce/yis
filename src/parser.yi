@@ -18,15 +18,18 @@ bring stdr
 : is_chained_call(node = any) (( bool )) {
   let tag = "tag"
   if stdr.is_null(node) { return false }
-  if stdr.str(node[tag] ?? "") != "call" { return false }
+  let nt = node[tag] ?? ""
+  if nt != "call" { return false }
   let func_key = "func"
   let fn = node[func_key]
   if stdr.is_null(fn) { return false }
-  if stdr.str(fn[tag] ?? "") != "member" { return false }
+  let ft = fn[tag] ?? ""
+  if ft != "member" { return false }
   let obj_key = "obj"
   let obj = fn[obj_key]
   if stdr.is_null(obj) { return false }
-  return stdr.str(obj[tag] ?? "") == "call"
+  let ot = obj[tag] ?? ""
+  return ot == "call"
 }
 
 : mk_return_stmt(v = any) (( any )) {
@@ -247,12 +250,13 @@ bring stdr
           let ?is_dict_type = false
           for (; depth > 0; ) {
             let tt = peek(toks, scan)
-            if tt[kind] == "lbrack" { depth = depth + 1 }
-            if tt[kind] == "rbrack" { depth = depth - 1 }
-            if depth == 1 && tt[kind] == "arrow" {
+            let tk = tt[kind] ?? ""
+            if tk == "lbrack" { depth = depth + 1 }
+            if tk == "rbrack" { depth = depth - 1 }
+            if depth == 1 && tk == "arrow" {
               is_dict_type = true
             }
-            if tt[kind] == "eof" { break }
+            if tk == "eof" { break }
             scan = scan + 1
           }
           -- consume full [ ... ] type annotation
@@ -260,9 +264,10 @@ bring stdr
           let ?depth2 = 1
           for (; depth2 > 0; ) {
             let tt = peek(toks, j)
-            if tt[kind] == "lbrack" { depth2 = depth2 + 1 }
-            if tt[kind] == "rbrack" { depth2 = depth2 - 1 }
-            if tt[kind] == "eof" { break }
+            let tk = tt[kind] ?? ""
+            if tk == "lbrack" { depth2 = depth2 + 1 }
+            if tk == "rbrack" { depth2 = depth2 - 1 }
+            if tk == "eof" { break }
             j = j + 1
           }
           if is_dict_type {
@@ -287,7 +292,7 @@ bring stdr
       let res = parse_expr(toks, j, 0)
       j = stdr.num(res[0] ?? j)
       let elem = res[1]
-      if !stdr.is_null(elem) { elems = stdr.concat(elems, [elem]) }
+      if !stdr.is_null(elem) { stdr.push(elems, elem) }
       let tc = peek(toks, j)
       if tc[kind] == "comma" { j = j + 1 }
     }
@@ -507,7 +512,7 @@ bring stdr
       let ek = "expr"
       arm[pk] = pat
       arm[ek] = arm_expr
-      arms = stdr.concat(arms, [arm])
+      stdr.push(arms, arm)
     }
   } elif tb[kind] == "colon" {
     -- Inline form: match x: pat1 => e1, pat2 => e2
@@ -526,7 +531,7 @@ bring stdr
       let ek = "expr"
       arm[pk] = pat
       arm[ek] = arm_expr
-      arms = stdr.concat(arms, [arm])
+      stdr.push(arms, arm)
       let tc = peek(toks, j)
       if tc[kind] == "comma" { j = j + 1 } else { break }
     }
@@ -560,7 +565,7 @@ bring stdr
         let res = parse_expr(toks, j, 0)
         j = stdr.num(res[0] ?? j)
         let arg = res[1]
-        if !stdr.is_null(arg) { args = stdr.concat(args, [arg]) }
+        if !stdr.is_null(arg) { stdr.push(args, arg) }
         let tc = peek(toks, j)
         if tc[kind] == "comma" { j = j + 1 }
       }
@@ -618,12 +623,12 @@ bring stdr
         if nk != "semi" && nk != "eof" && nk != "rbrace" && nk != "rpar" && nk != "rbrack" && nk != "comma" && nk != "colon" && nk != "lbrace" {
           let ares = parse_expr(toks, j, 0)
           j = stdr.num(ares[0] ?? j)
-          bargs = stdr.concat(bargs, [ares[1]])
+          stdr.push(bargs, ares[1])
           for (; peek(toks, j)[kind] == "comma"; ) {
             j = j + 1
             let ares2 = parse_expr(toks, j, 0)
             j = stdr.num(ares2[0] ?? j)
-            bargs = stdr.concat(bargs, [ares2[1]])
+            stdr.push(bargs, ares2[1])
           }
         }
         let ?n = []: [string => any]; n[tag] = "bang_call"
@@ -1121,7 +1126,7 @@ bring stdr
     let res = parse_stmt(toks, j2)
     let ?next = stdr.num(res[0] ?? j2)
     let stmt = res[1]
-    if !stdr.is_null(stmt) { stmts = stdr.concat(stmts, [stmt]) }
+    if !stdr.is_null(stmt) { stdr.push(stmts, stmt) }
     if next == j2 {
       -- No progress; skip token to avoid infinite loop
       j = j2 + 1
@@ -1201,10 +1206,11 @@ bring stdr
   let ?params = []: [any]
   for (; true; ) {
     let ?tp = peek(toks, j)
-    if tp[kind] == "rpar" || tp[kind] == "eof" { break }
+    let tpk = tp[kind] ?? ""
+    if tpk == "rpar" || tpk == "eof" { break }
     -- Parse param: [?]name = type
     let ?mutable = false
-    if tp[kind] == "qmark" {
+    if tpk == "qmark" {
       mutable = true
       j = j + 1
       tp = peek(toks, j)
@@ -1244,7 +1250,7 @@ bring stdr
     p[nk] = pname
     p[tk] = ptype
     p[mk_key] = mutable
-    params = stdr.concat(params, [p])
+    stdr.push(params, p)
     let tc = peek(toks, j)
     if tc[kind] == "comma" { j = j + 1 }
   }
@@ -1505,7 +1511,7 @@ bring stdr
         let mnext = stdr.num(mres[0] ?? j)
         let mnode = mres[1]
         if !stdr.is_null(mnode) {
-          methods = stdr.concat(methods, [mnode])
+          stdr.push(methods, mnode)
         }
         j = mnext
       } else {
@@ -1605,7 +1611,7 @@ bring stdr
       cur_i = i2 + 1
       continue
     }
-    cur_acc = stdr.concat(cur_acc, [node])
+    stdr.push(cur_acc, node)
     cur_i = next
   }
   let ?prog = []: [string => any]

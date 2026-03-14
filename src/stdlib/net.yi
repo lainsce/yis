@@ -233,6 +233,6 @@ bring stdr
 
 :: post_json(url = string, json_text = string, headers = any, params = any, timeout_secs = num) (( any )) {
   let ?hs = headers
-  hs = stdr.concat(hs, [["Content-Type", "application/json"]])
+  stdr.push(hs, ["Content-Type", "application/json"])
   return request("POST", url, json_text, hs, params, timeout_secs, true)
 }
