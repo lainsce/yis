@@ -184,6 +184,44 @@ bring stdr
   <- -1
 ;
 
+-- Validate magnitudes before numeric conversion. 2^63 is reserved for the
+-- parser's unary-minus case, since its positive value does not fit int64.
+: lex_integer(raw = string, digits = string, base = num, end_i = num, line = num, col = num) (( any ))
+  let n = stdr.len(digits)
+  let ?start = 0
+  for (; start + 1 < n; start += 1)
+    if stdr.slice(digits, start, start + 1) != "0" { break }
+  let canonical = stdr.slice(digits, start, n)
+  let limit = if base == 16 { "8000000000000000" } else { "9223372036854775808" }
+  let size = stdr.len(canonical)
+  let limit_size = stdr.len(limit)
+  let ?comparison = 0
+  if size > limit_size { comparison = 1 }
+  elif size < limit_size { comparison = 0 - 1 }
+  else
+    for (let ?i = 0; i < size; i += 1)
+      let digit = hex_value(stdr.slice(canonical, i, i + 1))
+      let bound = hex_value(stdr.slice(limit, i, i + 1))
+      if digit > bound { comparison = 1; break }
+      if digit < bound { comparison = 0 - 1; break }
+  if comparison > 0
+    <- lex_error("integer literal is outside the signed 64-bit range", end_i, line, col)
+
+  let ?t = tok("int", line, col, raw, 0, "")
+  if comparison == 0
+    t["int_text"] = "9223372036854775808"
+    t["min_magnitude"] = true
+  elif base == 16
+    -- The range check proves each multiplication and addition fits int64.
+    let ?value = 0
+    for (let ?i = 0; i < size; i += 1)
+      value = value * 16 + hex_value(stdr.slice(canonical, i, i + 1))
+    t["int_text"] = stdr.str(value)
+  else
+    t["int_text"] = canonical
+  <- [t, end_i, line, col + stdr.len(raw)]
+;
+
 : ascii_from_code(code = num) (( string ))
   if code == 7 { <- "\a" }
   if code == 8 { <- "\b" }
@@ -196,6 +234,7 @@ bring stdr
   if code >= 32 && code <= 126
     let printable = " !\"#$%&'()*+,-./0123456789:\<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
     <- stdr.slice(printable, code - 32, code - 31)
+  if code >= 0 && code <= 127 { <- stdr.char_from_code(code) }
   <- ""
 ;
 
@@ -298,8 +337,7 @@ bring stdr
   let hex_len = bare_hex_literal_len(source, i)
   if hex_len > 0
     let raw = stdr.slice(source, i, i + hex_len)
-    let value = stdr.parse_hex(raw)
-    <- [tok("int", line, col, raw, value, ""), i + hex_len, line, col + hex_len]
+    <- lex_integer(raw, raw, 16, i + hex_len, line, col)
   if c == ";" { <- [tok("semi", line, col, "", 0, ""), i + 1, line, col + 1] }
   if c == "(" { <- [tok("lpar", line, col, "", 0, ""), i + 1, line, col + 1] }
   if c == ")" { <- [tok("rpar", line, col, "", 0, ""), i + 1, line, col + 1] }
@@ -390,20 +428,22 @@ bring stdr
       if c2 == "\>" { <- [tok("arrow_right", line, col, "", 0, ""), i + 2, line, col + 2] }
     <- [tok("minus", line, col, "", 0, ""), i + 1, line, col + 1]
   if is_digit(c)
-    if c == "0" && i + 2 < n
+    if c == "0" && i + 1 < n
       let nx = stdr.slice(source, i + 1, i + 2)
       if nx == "x" || nx == "X"
         let first_hex = stdr.slice(source, i + 2, i + 3)
-        if hex_value(first_hex) >= 0
-          let ?j = i + 2
-          for (; j < n; )
-            let ch = stdr.slice(source, j, j + 1)
-            if hex_value(ch) < 0 { break }
-            j = j + 1
-          let raw = stdr.slice(source, i, j)
-          let hex_digits = stdr.slice(source, i + 2, j)
-          let value = stdr.parse_hex(hex_digits)
-          <- [tok("int", line, col, raw, value, ""), j, line, col + (j - i)]
+        if hex_value(first_hex) < 0
+          <- lex_error("hexadecimal literal requires a digit", i, line, col)
+        let ?j = i + 2
+        for (; j < n; )
+          let ch = stdr.slice(source, j, j + 1)
+          if hex_value(ch) < 0 { break }
+          j = j + 1
+        if j < n && is_ident_mid(stdr.slice(source, j, j + 1))
+          <- lex_error("invalid digit in hexadecimal literal", i, line, col)
+        let raw = stdr.slice(source, i, j)
+        let hex_digits = stdr.slice(source, i + 2, j)
+        <- lex_integer(raw, hex_digits, 16, j, line, col)
     let ?j = i
     for (; j < n; )
       let ch = stdr.slice(source, j, j + 1)
@@ -421,8 +461,8 @@ bring stdr
           j = j + 1
     let raw = stdr.slice(source, i, j)
     if is_float
-      <- [tok("float", line, col, raw, num(raw), ""), j, line, col + (j - i)]
-    <- [tok("int", line, col, raw, num(raw), ""), j, line, col + (j - i)]
+      <- [tok("float", line, col, raw, 0, ""), j, line, col + (j - i)]
+    <- lex_integer(raw, raw, 10, j, line, col)
   if is_ident_start(c)
     let ?j = i
     for (; j < n; )

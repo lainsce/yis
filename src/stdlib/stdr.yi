@@ -19,6 +19,10 @@ cask stdr
 : __readf_parse(fmt = string, line = string, args = any) (( any )) ;
 : __read_text_file(path = string) (( any )) ;
 : __write_text_file(path = string, text = string) (( bool )) ;
+: __realpath(path = string) (( any )) ;
+: __getenv(name = string) (( any )) ;
+: __temp_file(dir = string, prefix = string) (( any )) ;
+: __hash_text(text = string) (( string )) ;
 : __open_file_dialog(prompt = string, extension = string) (( any )) ;
 : __open_folder_dialog(prompt = string) (( any )) ;
 : __save_file_dialog(prompt = string, default_name = string, extension = string) (( any )) ;
@@ -169,6 +173,26 @@ cask stdr
 -- Read text file contents; returns null when file cannot be read
 :: read_text_file(path = string) (( any ))
   <- __read_text_file(path)
+;
+
+-- Canonical absolute path of an existing file; returns null when missing
+:: realpath(path = string) (( any ))
+  <- __realpath(path)
+;
+
+-- Read an environment variable; returns null when unset
+:: getenv(name = string) (( any ))
+  <- __getenv(name)
+;
+
+-- Create an exclusive empty temporary file in dir; returns its path or null
+:: temp_file(dir = string, prefix = string) (( any ))
+  <- __temp_file(dir, prefix)
+;
+
+-- Stable 64-bit FNV-1a hexadecimal hash of text bytes for cache identities
+:: hash_text(text = string) (( string ))
+  <- __hash_text(text)
 ;
 
 -- Write text to a file; returns true on success

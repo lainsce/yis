@@ -32,7 +32,7 @@ void yis_set_stdout_buffered(void) {
     }
 }
 
-char *yis_exe_dir(void) {
+char *yis_exe_path(void) {
     char *path = NULL;
 #if defined(__APPLE__)
     uint32_t sz = 0;
@@ -63,6 +63,11 @@ char *yis_exe_dir(void) {
         path = strdup(buf);
     }
 #endif
+    return path;
+}
+
+char *yis_exe_dir(void) {
+    char *path = yis_exe_path();
     if (!path) return NULL;
     // Strip the filename to get the directory
     char *last_sep = strrchr(path, '/');

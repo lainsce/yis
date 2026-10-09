@@ -297,7 +297,6 @@ static char *c_escape(Arena *arena, Str s) {
         switch (c) {
             case '\\': sb_append(&b, "\\\\"); break;
             case '"': sb_append(&b, "\\\""); break;
-            case '%': sb_append(&b, "%%"); break;
             case '\n': sb_append(&b, "\\n"); break;
             case '\t': sb_append(&b, "\\t"); break;
             case '\r': sb_append(&b, "\\r"); break;
@@ -417,6 +416,7 @@ typedef struct {
 
 typedef struct {
     char *continue_label;
+    size_t body_scope_depth;
 } LoopCtx;
 
 typedef struct {
@@ -659,11 +659,10 @@ static void codegen_release_scope(Codegen *cg, LocalList locals) {
     free(locals.items);
 }
 
-// Emit release calls for all locals in all current scopes without
-// popping them.  Used by STMT_RETURN so that an early 'return' does
-// not skip cleanup of scope-tracked locals (YisRef* from let/const/params).
-static void codegen_emit_all_scope_releases(Codegen *cg) {
-    for (size_t s = cg->scope_locals_len; s-- > 0;) {
+// Emit cleanup without popping compile-time scopes. Return exits every scope;
+// break and continue exit the scopes inside their current loop body.
+static void codegen_emit_scope_releases_from(Codegen *cg, size_t first_scope) {
+    for (size_t s = cg->scope_locals_len; s-- > first_scope;) {
         LocalList *ll = &cg->scope_locals[s];
         for (size_t i = ll->len; i-- > 0;) {
             if (ll->items[i].is_ref) {
@@ -675,6 +674,10 @@ static void codegen_emit_all_scope_releases(Codegen *cg) {
     }
 }
 
+static void codegen_emit_all_scope_releases(Codegen *cg) {
+    codegen_emit_scope_releases_from(cg, 0);
+}
+
 static bool codegen_loop_push(Codegen *cg, char *continue_label) {
     if (cg->loop_stack_len + 1 > cg->loop_stack_cap) {
         size_t next = cg->loop_stack_cap ? cg->loop_stack_cap * 2 : 8;
@@ -684,6 +687,7 @@ static bool codegen_loop_push(Codegen *cg, char *continue_label) {
         cg->loop_stack_cap = next;
     }
     cg->loop_stack[cg->loop_stack_len].continue_label = continue_label;
+    cg->loop_stack[cg->loop_stack_len].body_scope_depth = cg->scope_locals_len;
     cg->loop_stack_len++;
     return true;
 }
@@ -1394,7 +1398,7 @@ static bool gen_if_expr_chain(Codegen *cg,
         GenExpr v;
         if (!gen_expr(cg, path, arm->value, &v, err)) return false;
         w_line(&cg->w, "yis_move_into(&%s, %s);", result_tmp, v.tmp);
-        gen_expr_release_except(cg, &v, v.tmp);
+        gen_expr_release_except(cg, &v, NULL);
         gen_expr_free(&v);
         return true;
     }
@@ -1413,7 +1417,7 @@ static bool gen_if_expr_chain(Codegen *cg,
     GenExpr v;
     if (!gen_expr(cg, path, arm->value, &v, err)) return false;
     w_line(&cg->w, "yis_move_into(&%s, %s);", result_tmp, v.tmp);
-    gen_expr_release_except(cg, &v, v.tmp);
+    gen_expr_release_except(cg, &v, NULL);
     gen_expr_free(&v);
     cg->w.indent--;
 
@@ -1558,7 +1562,6 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
             for (size_t i = 0; i < e->as.array_lit.items_len; i++) {
                 GenExpr ge;
                 if (!gen_expr(cg, path, e->as.array_lit.items[i], &ge, err)) return false;
-                w_line(&cg->w, "yis_retain_val(%s);", ge.tmp);
                 w_line(&cg->w, "yis_arr_add(%s, %s);", arrsym, ge.tmp);
                 gen_expr_release_except(cg, &ge, ge.tmp);
                 gen_expr_free(&ge);
@@ -1774,7 +1777,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                 GenExpr arm_expr;
                 if (!gen_expr(cg, path, arm->expr, &arm_expr, err)) return false;
                 w_line(&cg->w, "yis_move_into(&%s, %s);", t, arm_expr.tmp);
-                gen_expr_release_except(cg, &arm_expr, arm_expr.tmp);
+                gen_expr_release_except(cg, &arm_expr, NULL);
                 gen_expr_free(&arm_expr);
                 if (bind_tmp && pushed) {
                     LocalList locals = codegen_pop_scope(cg);
@@ -1932,7 +1935,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         gen_expr_free(&ge);
                         return cg_set_errf(err, path, e->line, e->col, "unknown field '%.*s' in constructor", (int)aname.len, aname.data);
                     }
-                    gen_expr_release_except(cg, &ge, ge.tmp);
+                    gen_expr_release_except(cg, &ge, NULL);
                     gen_expr_free(&ge);
                 }
             } else if (!init && e->as.new_expr.args_len > 0 &&
@@ -1945,7 +1948,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                     if (!gen_expr(cg, path, e->as.new_expr.args[i], &ge, err)) return false;
                     FieldDecl *fd = decl->fields[i];
                     w_line(&cg->w, "yis_move_into(&%s->%s, %s);", obj_name, codegen_c_field_name(cg, fd->name), ge.tmp);
-                    gen_expr_release_except(cg, &ge, ge.tmp);
+                    gen_expr_release_except(cg, &ge, NULL);
                     gen_expr_free(&ge);
                 }
             } else if (init) {
@@ -2146,14 +2149,12 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                 w_line(&cg->w, "if (%s.tag != EVT_NULL) {", left.tmp);
                 cg->w.indent++;
                 w_line(&cg->w, "yis_move_into(&%s, %s);", t, left.tmp);
-                w_line(&cg->w, "%s = YV_NULLV;", left.tmp);
                 cg->w.indent--;
                 w_line(&cg->w, "} else {");
                 cg->w.indent++;
                 GenExpr right;
                 if (!gen_expr(cg, path, e->as.binary.b, &right, err)) { gen_expr_free(&left); return false; }
                 w_line(&cg->w, "yis_move_into(&%s, %s);", t, right.tmp);
-                w_line(&cg->w, "%s = YV_NULLV;", right.tmp);
                 w_line(&cg->w, "yis_release_val(%s);", right.tmp);
                 gen_expr_release_except(cg, &right, right.tmp);
                 gen_expr_free(&right);
@@ -2246,7 +2247,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
             GenExpr at;
             if (!gen_expr(cg, path, e->as.ternary.then_expr, &at, err)) { gen_expr_free(&ct); return false; }
             w_line(&cg->w, "yis_move_into(&%s, %s);", t, at.tmp);
-            gen_expr_release_except(cg, &at, at.tmp);
+            gen_expr_release_except(cg, &at, NULL);
             gen_expr_free(&at);
             cg->w.indent--;
             w_line(&cg->w, "} else {");
@@ -2254,7 +2255,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
             GenExpr bt;
             if (!gen_expr(cg, path, e->as.ternary.else_expr, &bt, err)) { gen_expr_free(&ct); return false; }
             w_line(&cg->w, "yis_move_into(&%s, %s);", t, bt.tmp);
-            gen_expr_release_except(cg, &bt, bt.tmp);
+            gen_expr_release_except(cg, &bt, NULL);
             gen_expr_free(&bt);
             cg->w.indent--;
             w_line(&cg->w, "}");
@@ -2345,7 +2346,6 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         return cg_set_err(err, path, "unknown assignment target");
                     }
                     w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, slot, vt.tmp);
-                    w_line(&cg->w, "yis_retain_val(%s);", tret);
                     w_line(&cg->w, "yis_move_into(&%s, %s);", slot, tret);
                 } else if (e->as.assign.target->kind == EXPR_INDEX) {
                     Ty *base_ty = cg_tc_expr(cg, path, e->as.assign.target->as.index.a, err);
@@ -2377,12 +2377,10 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                     if (base_ty->tag == TY_DICT) {
                         w_line(&cg->w, "YisVal %s = yis_dict_get((YisDict*)%s.as.p, %s);", cur, at.tmp, it.tmp);
                         w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
-                        w_line(&cg->w, "yis_retain_val(%s);", tret);
                         w_line(&cg->w, "yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, it.tmp, tret);
                     } else if (base_ty->tag == TY_ARRAY) {
                         w_line(&cg->w, "YisVal %s = yis_arr_get((YisArr*)%s.as.p, yis_as_int(%s));", cur, at.tmp, it.tmp);
                         w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
-                        w_line(&cg->w, "yis_retain_val(%s);", tret);
                         w_line(&cg->w, "yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, it.tmp, tret);
                     } else {
                         w_line(&cg->w, "YisVal %s = YV_NULLV;", cur);
@@ -2390,7 +2388,6 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         w_line(&cg->w, "else if (%s.tag == EVT_ARR) %s = yis_arr_get((YisArr*)%s.as.p, yis_as_int(%s));", at.tmp, cur, at.tmp, it.tmp);
                         w_line(&cg->w, "else yis_trap(\"compound index assignment expects array or dict\");");
                         w_line(&cg->w, "YisVal %s = %s(%s, %s);", tret, opfn, cur, vt.tmp);
-                        w_line(&cg->w, "yis_retain_val(%s);", tret);
                         w_line(&cg->w, "if (%s.tag == EVT_DICT) yis_dict_set((YisDict*)%s.as.p, %s, %s);", at.tmp, at.tmp, it.tmp, tret);
                         w_line(&cg->w, "else yis_arr_set((YisArr*)%s.as.p, yis_as_int(%s), %s);", at.tmp, it.tmp, tret);
                     }
@@ -2415,7 +2412,6 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                     char *cname = codegen_c_class_name(cg, base_ty->name);
                     char *field = codegen_c_field_name(cg, e->as.assign.target->as.member.name);
                     w_line(&cg->w, "YisVal %s = %s(((%s*)%s.as.p)->%s, %s);", tret, opfn, cname, at.tmp, field, vt.tmp);
-                    w_line(&cg->w, "yis_retain_val(%s);", tret);
                     w_line(&cg->w, "yis_move_into(&((%s*)%s.as.p)->%s, %s);", cname, at.tmp, field, tret);
                     w_line(&cg->w, "yis_release_val(%s);", at.tmp);
                     gen_expr_release_except(cg, &at, at.tmp);
@@ -2425,7 +2421,7 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                     return cg_set_err(err, path, "unsupported assignment target");
                 }
             }
-            gen_expr_release_except(cg, &vt, vt.tmp);
+            gen_expr_release_except(cg, &vt, NULL);
             gen_expr_free(&vt);
             gen_expr_add(out, tret);
             out->tmp = tret;
@@ -2887,6 +2883,62 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         gen_expr_release_except(cg, &tzv, tzv.tmp);
                         gen_expr_free(&isov);
                         gen_expr_free(&tzv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__realpath")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__realpath expects 1 arg");
+                        GenExpr pathv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &pathv, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_realpath(%s);", t, pathv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", pathv.tmp);
+                        gen_expr_release_except(cg, &pathv, pathv.tmp);
+                        gen_expr_free(&pathv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__getenv")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__getenv expects 1 arg");
+                        GenExpr namev;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &namev, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_getenv(%s);", t, namev.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", namev.tmp);
+                        gen_expr_release_except(cg, &namev, namev.tmp);
+                        gen_expr_free(&namev);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__temp_file")) {
+                        if (e->as.call.args_len != 2) return cg_set_err(err, path, "__temp_file expects 2 args");
+                        GenExpr dirv, prefixv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &dirv, err)) return false;
+                        if (!gen_expr(cg, path, e->as.call.args[1], &prefixv, err)) { gen_expr_free(&dirv); return false; }
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_temp_file(%s, %s);", t, dirv.tmp, prefixv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", dirv.tmp);
+                        gen_expr_release_except(cg, &dirv, dirv.tmp);
+                        gen_expr_free(&dirv);
+                        w_line(&cg->w, "yis_release_val(%s);", prefixv.tmp);
+                        gen_expr_release_except(cg, &prefixv, prefixv.tmp);
+                        gen_expr_free(&prefixv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__hash_text")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__hash_text expects 1 arg");
+                        GenExpr textv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &textv, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_hash_text(%s);", t, textv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", textv.tmp);
+                        gen_expr_release_except(cg, &textv, textv.tmp);
+                        gen_expr_free(&textv);
                         gen_expr_add(out, t);
                         out->tmp = t;
                         return true;
@@ -3366,10 +3418,11 @@ static bool gen_if_chain(Codegen *cg, Str path, IfArm **arms, size_t idx, size_t
     if (idx >= arms_len) return true;
     IfArm *arm = arms[idx];
     if (!arm->cond) {
-        if (arm->body->kind == STMT_BLOCK) {
-            return gen_block(cg, path, arm->body, ret_void, err);
-        }
-        return gen_block(cg, path, arm->body, ret_void, err);
+        codegen_push_scope(cg);
+        if (!gen_block(cg, path, arm->body, ret_void, err)) return false;
+        LocalList locals = codegen_pop_scope(cg);
+        codegen_release_scope(cg, locals);
+        return true;
     }
     GenExpr cond;
     if (!gen_expr(cg, path, arm->cond, &cond, err)) return false;
@@ -3445,7 +3498,7 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             GenExpr ge;
             if (!gen_expr(cg, path, s->as.let_s.expr, &ge, err)) return false;
             w_line(&cg->w, "yis_move_into(&%s, %s);", slot, ge.tmp);
-            gen_expr_release_except(cg, &ge, ge.tmp);
+            gen_expr_release_except(cg, &ge, NULL);
             gen_expr_free(&ge);
             return true;
         }
@@ -3460,7 +3513,7 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             GenExpr ge;
             if (!gen_expr(cg, path, s->as.const_s.expr, &ge, err)) return false;
             w_line(&cg->w, "yis_move_into(&%s, %s);", slot, ge.tmp);
-            gen_expr_release_except(cg, &ge, ge.tmp);
+            gen_expr_release_except(cg, &ge, NULL);
             gen_expr_free(&ge);
             return true;
         }
@@ -3489,7 +3542,7 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
                     GenExpr ge;
                     if (!gen_expr(cg, path, s->as.ret_s.expr, &ge, err)) return false;
                     w_line(&cg->w, "yis_move_into(&__ret, %s);", ge.tmp);
-                    gen_expr_release_except(cg, &ge, ge.tmp);
+                    gen_expr_release_except(cg, &ge, NULL);
                     gen_expr_free(&ge);
                 }
                 codegen_emit_all_scope_releases(cg);
@@ -3501,11 +3554,14 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             return gen_if_chain(cg, path, s->as.if_s.arms, 0, s->as.if_s.arms_len, ret_void, err);
         }
         case STMT_BREAK: {
+            LoopCtx *lc = codegen_loop_current(cg);
+            if (lc) codegen_emit_scope_releases_from(cg, lc->body_scope_depth);
             w_line(&cg->w, "break;");
             return true;
         }
         case STMT_CONTINUE: {
             LoopCtx *lc = codegen_loop_current(cg);
+            if (lc) codegen_emit_scope_releases_from(cg, lc->body_scope_depth);
             if (lc && lc->continue_label) {
                 w_line(&cg->w, "goto %s;", lc->continue_label);
             } else {
@@ -3514,6 +3570,9 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             return true;
         }
         case STMT_FOR: {
+            w_line(&cg->w, "{");
+            cg->w.indent++;
+            codegen_push_scope(cg);
             if (s->as.for_s.init) {
                 if (!gen_stmt(cg, path, s->as.for_s.init, ret_void, err)) return false;
             }
@@ -3557,6 +3616,10 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             codegen_loop_pop(cg);
             cg->w.indent--;
             w_line(&cg->w, "}");
+            LocalList loop_locals = codegen_pop_scope(cg);
+            codegen_release_scope(cg, loop_locals);
+            cg->w.indent--;
+            w_line(&cg->w, "}");
             return true;
         }
         case STMT_FOREACH: {
@@ -3576,9 +3639,15 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
                 return cg_set_err(err, path, "foreach expects array or string");
             }
 
+            w_line(&cg->w, "{");
+            cg->w.indent++;
             codegen_push_scope(cg);
+            if (!codegen_add_local(cg, it.tmp, false)) return cg_set_err(err, path, "out of memory");
+            gen_expr_release_except(cg, &it, it.tmp);
             char *cvar = codegen_define_local(cg, s->as.foreach_s.name, ety, false, false);
-            w_line(&cg->w, "YisVal %s = YV_NULLV;", cvar);
+            if (!cvar) return cg_set_err(err, path, "out of memory");
+            char *slot = codegen_cname_of(cg, s->as.foreach_s.name);
+            w_line(&cg->w, "YisRef* %s = yis_ref_new();", cvar);
 
             w_line(&cg->w, "int %s = stdr_len(%s);", len_name, it.tmp);
             w_line(&cg->w, "for (int %s = 0; %s < %s; %s++) {", idx_name, idx_name, len_name, idx_name);
@@ -3593,7 +3662,8 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
             } else {
                 w_line(&cg->w, "YisVal __e = stdr_str_at(%s, %s);", it.tmp, idx_name);
             }
-            w_line(&cg->w, "yis_move_into(&%s, __e);", cvar);
+            w_line(&cg->w, "yis_move_into(&%s, __e);", slot);
+            w_line(&cg->w, "yis_release_val(__e);");
 
             if (s->as.foreach_s.body->kind == STMT_BLOCK) {
                 if (!gen_block(cg, path, s->as.foreach_s.body, ret_void, err)) return false;
@@ -3609,9 +3679,9 @@ static bool gen_stmt(Codegen *cg, Str path, Stmt *s, bool ret_void, Diag *err) {
 
             LocalList outer_locals = codegen_pop_scope(cg);
             codegen_release_scope(cg, outer_locals);
-            w_line(&cg->w, "yis_release_val(%s);", it.tmp);
-            gen_expr_release_except(cg, &it, it.tmp);
             gen_expr_free(&it);
+            cg->w.indent--;
+            w_line(&cg->w, "}");
             return true;
         }
         case STMT_BLOCK: {
@@ -4063,10 +4133,7 @@ static void codegen_free(Codegen *cg) {
     sb_free(&cg->out);
 }
 
-static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ext_bindings_path, Diag *err) {
-    bool has_ext_module = ext_module_name && ext_module_name[0];
-    codegen_collect_lambdas(cg);
-
+static const char *codegen_runtime_source(Arena *arena, size_t *out_len, Diag *err) {
     const char *runtime_override = getenv("YIS_RUNTIME");
     bool runtime_forced = runtime_override && runtime_override[0];
     const char *runtime_path = runtime_forced ? runtime_override : NULL;
@@ -4120,23 +4187,54 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
             }
         }
     }
-    Arena tmp_arena;
-    arena_init(&tmp_arena);
     size_t runtime_len = 0;
     const char *runtime_src = NULL;
     if (runtime_path && runtime_path[0]) {
-        char *runtime_file_src = read_file_with_includes(runtime_path, "// @include", &tmp_arena, &runtime_len, NULL);
+        char *runtime_file_src = read_file_with_includes(runtime_path, "// @include", arena, &runtime_len, NULL);
         if (runtime_file_src) {
             runtime_src = runtime_file_src;
         } else if (runtime_forced) {
-            arena_free(&tmp_arena);
             free(exe_runtime_path);
-            return cg_set_err(err, (Str){runtime_path, strlen(runtime_path)}, "failed to read runtime.inc");
+            cg_set_err(err, (Str){runtime_path, strlen(runtime_path)}, "failed to read runtime.inc");
+            return NULL;
         }
     }
     if (!runtime_src) {
         runtime_src = (const char *)yis_runtime_embedded;
         runtime_len = (size_t)yis_runtime_embedded_len;
+    }
+    free(exe_runtime_path);
+    *out_len = runtime_len;
+    return runtime_src;
+}
+
+bool codegen_runtime_hash(uint64_t *hash, Diag *err) {
+    Arena arena;
+    arena_init(&arena);
+    size_t len = 0;
+    const char *source = codegen_runtime_source(&arena, &len, err);
+    if (!source) {
+        arena_free(&arena);
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        *hash ^= (unsigned char)source[i];
+        *hash *= UINT64_C(1099511628211);
+    }
+    arena_free(&arena);
+    return true;
+}
+
+static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ext_bindings_path, Diag *err) {
+    bool has_ext_module = ext_module_name && ext_module_name[0];
+    codegen_collect_lambdas(cg);
+    Arena tmp_arena;
+    arena_init(&tmp_arena);
+    size_t runtime_len = 0;
+    const char *runtime_src = codegen_runtime_source(&tmp_arena, &runtime_len, err);
+    if (!runtime_src) {
+        arena_free(&tmp_arena);
+        return false;
     }
 
     size_t module_bindings_len = 0;
@@ -4148,7 +4246,6 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
             module_bindings_src = bindings_src;
         } else {
             arena_free(&tmp_arena);
-            free(exe_runtime_path);
             return cg_set_err(err, (Str){ext_bindings_path, strlen(ext_bindings_path)},
                               "failed to read module bindings file");
         }
@@ -4161,7 +4258,6 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
     if (has_ext_module) {
         if (!module_bindings_src || module_bindings_len == 0) {
             arena_free(&tmp_arena);
-            free(exe_runtime_path);
             return cg_set_err(err, (Str){0}, "program imports external module but bindings file was not found");
         }
         sb_append_n(&cg->out, module_bindings_src, module_bindings_len);
@@ -4170,8 +4266,6 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
         }
     }
     arena_free(&tmp_arena);
-    free(exe_runtime_path);
-    exe_runtime_path = NULL;
 
     w_line(&cg->w, "// ---- cask globals ----");
     for (size_t i = 0; i < cg->prog->mods_len; i++) {
@@ -4322,7 +4416,7 @@ static bool codegen_gen(Codegen *cg, const char *ext_module_name, const char *ex
             if (!gen_expr(cg, m->path, d->as.def_decl.expr, &ge, err)) return false;
             char *gname = mangle_global_var(cg->arena, mod_name, d->as.def_decl.name);
             w_line(&cg->w, "yis_move_into(&%s, %s);", gname, ge.tmp);
-            gen_expr_release_except(cg, &ge, ge.tmp);
+            gen_expr_release_except(cg, &ge, NULL);
             gen_expr_free(&ge);
         }
 

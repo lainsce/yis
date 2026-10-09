@@ -7,6 +7,11 @@ bring stdr
 
 def ?semi_depth = 0
 def ?brace_depth = 0
+def ?had_error = false
+
+:: has_errors() (( bool ))
+  <- had_error
+;
 
 -- Helper: <- a 2-element array.
 : pair(a = any, b = any) (( any ))
@@ -109,12 +114,20 @@ def ?brace_depth = 0
   let t = peek(toks, i)
   let tk = t[kind] ?? ""
 
+  if tk == "error"
+    parse_error(t, t[text] ?? "lexical error")
+    <- pair(i + 1, null)
+
   -- Integer literal
   if tk == "int"
+    let minimum_magnitude = t["min_magnitude"] ?? false
+    if minimum_magnitude
+      parse_error(t, "positive integer literal is outside the signed 64-bit range")
+      <- pair(i + 1, null)
     let ?n = []: [string => any]
     n[tag] = "int"
     let vk = "value"
-    n[vk] = stdr.str(t["int_val"] ?? (t[text] ?? "0"))
+    n[vk] = t["int_text"] ?? stdr.str(t["int_val"] ?? (t[text] ?? "0"))
     <- pair(i + 1, n)
 
   -- Float literal
@@ -166,6 +179,20 @@ def ?brace_depth = 0
   -- Parse operand as a high-precedence expression so postfix binds first:
   -- !stdr.is_null(x) => !(stdr.is_null(x))
   if tk == "bang" || tk == "minus" || tk == "hash"
+    let next_token = peek(toks, i + 1)
+    let minimum_magnitude = next_token["min_magnitude"] ?? false
+    if tk == "minus" && minimum_magnitude
+      -- The positive magnitude cannot be represented as a runtime value.
+      -- Recognize the complete negative literal before parsing its operand.
+      let following = peek(toks, i + 2)
+      let following_kind = following["kind"] ?? ""
+      if following_kind == "lpar" || following_kind == "lbrack" || following_kind == "dot" || following_kind == "bang"
+        parse_error(next_token, "out-of-range integer magnitude cannot have a postfix expression")
+        <- pair(i + 2, null)
+      let ?minimum = []: [string => any]
+      minimum["tag"] = "int"
+      minimum["value"] = "-9223372036854775808"
+      <- pair(i + 2, minimum)
     let res = parse_expr(toks, i + 1, 9)
     let next = stdr.num(res[0] ?? (i + 1))
     let operand = res[1]
@@ -279,24 +306,66 @@ def ?brace_depth = 0
       let ek = "elems"
       n[ek] = []: [any]
       <- pair(j, n)
-    -- Non-empty array: [e1, e2, ...]
+    -- Non-empty array or dictionary. The first element determines the form;
+    -- dictionary entries require => and both forms require comma separators.
     let ?elems = []: [any]
+    let ?entries = []: [any]
+    let ?is_dict = false
+    let ?has_element = false
     let ?j = i + 1
     for (; true; )
       let tt = peek(toks, j)
-      if tt[kind] == "rbrack" || tt[kind] == "eof" { break }
+      let element_kind = tt[kind] ?? ""
+      if element_kind == "rbrack" { break }
+      if element_kind == "eof"
+        parse_error(tt, "unclosed array or dictionary literal")
+        <- pair(j, null)
+      let element_start = j
       let res = parse_expr(toks, j, 0)
       j = stdr.num(res[0] ?? j)
       let elem = res[1]
-      if !stdr.is_null(elem) { stdr.push(elems, elem) }
+      if stdr.is_null(elem) || j <= element_start
+        parse_error(tt, "expected an array element or dictionary key")
+        <- pair(j, null)
       let tc = peek(toks, j)
-      if tc[kind] == "comma" { j = j + 1 }
+      let has_arrow = tc[kind] == "arrow"
+      if !has_element
+        is_dict = has_arrow
+        has_element = true
+      elif is_dict != has_arrow
+        parse_error(tc, "cannot mix array elements and dictionary entries")
+        <- pair(j, null)
+      if is_dict
+        j += 1
+        let value_token = peek(toks, j)
+        let value_start = j
+        let value_res = parse_expr(toks, j, 0)
+        j = stdr.num(value_res[0] ?? j)
+        let value = value_res[1]
+        if stdr.is_null(value) || j <= value_start
+          parse_error(value_token, "expected a dictionary value after =>")
+          <- pair(j, null)
+        let ?entry = []: [string => any]
+        entry["key"] = elem
+        entry["value"] = value
+        stdr.push(entries, entry)
+      else
+        stdr.push(elems, elem)
+      let separator = peek(toks, j)
+      let separator_kind = separator[kind] ?? ""
+      if separator_kind == "comma" { j += 1 }
+      elif separator_kind != "rbrack"
+        parse_error(separator, "expected ',' or ']' after literal element")
+        <- pair(j, null)
     let tf = peek(toks, j)
     if tf[kind] == "rbrack" { j = j + 1 }
     let ?n = []: [string => any]
-    n[tag] = "array"
-    let ek = "elems"
-    n[ek] = elems
+    if is_dict
+      n[tag] = "dict"
+      n["entries"] = entries
+    else
+      n[tag] = "array"
+      n["elems"] = elems
     <- pair(j, n)
 
   -- if-expression: if cond { expr } elif cond { expr } else { expr }
@@ -436,11 +505,24 @@ def ?brace_depth = 0
   let tag = "tag"
   let t = peek(toks, i)
   let tk = t[kind] ?? ""
+  if tk == "minus"
+    let literal = peek(toks, i + 1)
+    let literal_kind = literal[kind] ?? ""
+    if literal_kind == "int"
+      let magnitude = literal["int_text"] ?? stdr.str(literal["int_val"] ?? "0")
+      let ?n = []: [string => any]
+      n[tag] = "pat_int"
+      n["value"] = if magnitude == "0" { "0" } else { stdr.str_concat("-", magnitude) }
+      <- pair(i + 2, n)
   if tk == "int"
+    let minimum_magnitude = t["min_magnitude"] ?? false
+    if minimum_magnitude
+      parse_error(t, "positive integer literal is outside the signed 64-bit range")
+      <- pair(i + 1, null)
     let ?n = []: [string => any]
     n[tag] = "pat_int"
     let vk = "value"
-    n[vk] = stdr.str(t["int_val"] ?? (t[text] ?? "0"))
+    n[vk] = t["int_text"] ?? stdr.str(t["int_val"] ?? (t[text] ?? "0"))
     <- pair(i + 1, n)
   if tk == "str"
     let ?n = []: [string => any]
@@ -1826,10 +1908,9 @@ def ?brace_depth = 0
     let res = parse_decl(toks, i2)
     let next = res[0] ?? i2
     let node = res[1]
-    if stdr.is_null(node)
-      -- Skip unrecognized token to avoid infinite loop
-      cur_i = i2 + 1
-      continue
+    if stdr.is_null(node) || next <= i2
+      parse_error(t, "unexpected token in declaration")
+      <- pair(i2, null)
     stdr.push(cur_acc, node)
     cur_i = next
   let ?prog = []: [string => any]
@@ -1838,23 +1919,53 @@ def ?brace_depth = 0
   <- pair(cur_i, prog)
 ;
 
+: parse_error(t = any, message = string) (( -- ))
+  had_error = true
+  write("error: line ")
+  write(stdr.str(t["line"] ?? 0))
+  write(", column ")
+  write(stdr.str(t["col"] ?? 0))
+  write(": ")
+  write(message)
+  write("\n")
+;
+
 :: parse(toks = any) (( any ))
+  had_error = false
   -- Lexical errors invalidate the whole source, including otherwise valid declarations.
   let n = stdr.len(toks)
   for (let ?i = 0; i < n; i = i + 1)
     let t = toks[i]
     if t["kind"] == "error"
-      write("error: line ")
-      write(stdr.str(t["line"] ?? 0))
-      write(", column ")
-      write(stdr.str(t["col"] ?? 0))
-      write(": ")
-      write(t["text"] ?? "lexical error")
-      write("\n")
+      parse_error(t, t["text"] ?? "lexical error")
       <- null
+  -- Match explicit delimiters before permissive expression parsing can consume them.
+  let ?stack = []: [any]
+  let ?depth = 0
+  for (let ?i = 0; i < n; i += 1)
+    let t = toks[i]
+    let kind = t["kind"] ?? ""
+    if kind == "lpar" || kind == "lbrack" || kind == "lbrace"
+      stack[depth] = t
+      depth += 1
+    elif kind == "rpar" || kind == "rbrack" || kind == "rbrace"
+      if depth == 0
+        parse_error(t, "unexpected closing delimiter")
+        <- null
+      let open = stack[depth - 1] ?? []: [string => any]
+      let opening = open["kind"] ?? ""
+      let matching = (opening == "lpar" && kind == "rpar") || (opening == "lbrack" && kind == "rbrack") || (opening == "lbrace" && kind == "rbrace")
+      if !matching
+        parse_error(t, "mismatched closing delimiter")
+        <- null
+      depth -= 1
+  if depth > 0
+    parse_error(stack[depth - 1], "unclosed delimiter")
+    <- null
   let res = parse_program_at(toks, 0, []: [any])
   let _next = res[0]
   let prog = res[1]
+  if had_error { <- null }
   <- prog
 ;
 

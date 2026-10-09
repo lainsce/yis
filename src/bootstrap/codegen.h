@@ -2,6 +2,7 @@
 #define YIS_CODEGEN_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "ast.h"
 #include "diag.h"
@@ -12,5 +13,8 @@
 bool emit_c(Program *prog, const char *out_path,
             const char *ext_module_name, const char *ext_bindings_path,
             Diag *err);
+
+// Extend a cache hash with the exact expanded runtime selected by emit_c.
+bool codegen_runtime_hash(uint64_t *hash, Diag *err);
 
 #endif

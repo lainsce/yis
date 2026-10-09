@@ -2,6 +2,9 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
@@ -19,6 +22,7 @@
 #include <sys/stat.h>
 #include <stddef.h>
 #include <errno.h>
+#include <fcntl.h>
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #endif
@@ -141,8 +145,57 @@ static void yis_trap(const char* msg) {
   abort();
 }
 
-static void yis_retain_val(YisVal v);
-static void yis_release_val(YisVal v);
+// Keep allocation arithmetic checked before touching storage. Runtime failures
+// abort deliberately instead of continuing with a null pointer or wrapped size.
+static size_t yis_size_add(size_t a, size_t b) {
+  if (b > SIZE_MAX - a) yis_trap("allocation size overflow");
+  return a + b;
+}
+
+static size_t yis_size_mul(size_t count, size_t size) {
+  if (size != 0 && count > SIZE_MAX / size) yis_trap("allocation size overflow");
+  return count * size;
+}
+
+static void* yis_alloc(size_t size) {
+  void* out = malloc(size);
+  if (!out) yis_trap("out of memory");
+  return out;
+}
+
+static void* yis_realloc(void* ptr, size_t size) {
+  void* out = realloc(ptr, size);
+  if (!out) yis_trap("out of memory");
+  return out;
+}
+
+static size_t yis_grow_capacity(size_t cap, size_t needed, size_t item_size) {
+  size_t limit = SIZE_MAX / item_size;
+  if (needed > limit) yis_trap("allocation size overflow");
+  if (cap == 0) cap = needed < 4 ? 4 : needed;
+  if (cap > limit) cap = needed;
+  while (cap < needed) {
+    if (cap > limit / 2) {
+      cap = needed;
+      break;
+    }
+    cap *= 2;
+  }
+  return cap;
+}
+
+static void yis_retain_heap(YisVal v);
+static void yis_release_heap(YisVal v);
+
+// Primitive values have no ownership work. Keep this dispatch at the call site
+// so the C compiler can remove it when a value's scalar tag is already known.
+static inline __attribute__((always_inline)) void yis_retain_val(YisVal v) {
+  if (v.tag >= EVT_STR) yis_retain_heap(v);
+}
+
+static inline __attribute__((always_inline)) void yis_release_val(YisVal v) {
+  if (v.tag >= EVT_STR) yis_release_heap(v);
+}
 static int64_t yis_as_int(YisVal v);
 static YisRef* yis_ref_new(void);
 static void yis_ref_retain(YisRef* r);
@@ -184,7 +237,7 @@ static YisStr* stdr_str_lit(const char* s) {
   size_t n = strlen(s);
   if (n == 0) return &yis_static_empty;
   if (n == 1) return yis_static_char((unsigned char)s[0]);
-  YisStr* st = (YisStr*)malloc(sizeof(YisStr) + n + 1);
+  YisStr* st = (YisStr*)yis_alloc(yis_size_add(sizeof(YisStr), yis_size_add(n, 1)));
   st->ref = 1;
   st->len = n;
   st->data = (char*)(st + 1);
@@ -298,14 +351,14 @@ static YisStr* stdr_read_line(void) {
   while ((c = fgetc(stdin)) != EOF) {
     if (c == '\n') break;
     if (len + 1 >= cap) {
-      cap *= 2;
+      cap = yis_grow_capacity(cap, yis_size_add(len, 2), 1);
       buf = (char*)realloc(buf, cap);
       if (!buf) yis_trap("out of memory");
     }
     buf[len++] = (char)c;
   }
   if (len > 0 && buf[len - 1] == '\r') len--;
-  YisStr* s = (YisStr*)malloc(sizeof(YisStr) + len + 1);
+  YisStr* s = (YisStr*)yis_alloc(yis_size_add(sizeof(YisStr), yis_size_add(len, 1)));
   if (!s) yis_trap("out of memory");
   s->ref = 1;
   s->len = len;
@@ -335,7 +388,7 @@ static YisVal stdr_read_text_file(YisVal pathv) {
     return YV_NULLV;
   }
   size_t len = (size_t)sz;
-  YisStr* out = (YisStr*)malloc(sizeof(YisStr) + len + 1);
+  YisStr* out = (YisStr*)yis_alloc(yis_size_add(sizeof(YisStr), yis_size_add(len, 1)));
   if (!out) {
     fclose(f);
     yis_trap("out of memory");
@@ -363,8 +416,9 @@ static YisVal stdr_write_text_file(YisVal pathv, YisVal textv) {
   if (!f) return YV_BOOL(false);
   size_t n = 0;
   if (text->len > 0) n = fwrite(text->data, 1, text->len, f);
-  bool ok = (n == text->len) && (fclose(f) == 0);
-  return YV_BOOL(ok);
+  // fclose must run even after a short write to release the descriptor.
+  int closed = fclose(f);
+  return YV_BOOL(n == text->len && closed == 0);
 }
 
 static bool stdr_is_dir_path(const char* path) {
@@ -390,7 +444,7 @@ static YisVal stdr_ensure_dir(YisVal pathv) {
   if (!path || path->len == 0) return YV_BOOL(false);
 
   size_t len = path->len;
-  char* buf = (char*)malloc(len + 2);
+  char* buf = (char*)malloc(yis_size_add(len, 2));
   if (!buf) yis_trap("out of memory");
   memcpy(buf, path->data, len);
   buf[len] = 0;
@@ -444,6 +498,90 @@ static YisVal stdr_remove_file(YisVal pathv) {
   return YV_BOOL(false);
 }
 
+// Canonical identity for existing files, including symlink resolution on POSIX.
+static YisVal stdr_realpath(YisVal pathv) {
+  if (pathv.tag != EVT_STR) yis_trap("realpath expects string path");
+  YisStr* path = (YisStr*)pathv.as.p;
+  if (path->len == 0 || memchr(path->data, 0, path->len)) return YV_NULLV;
+#if defined(_WIN32)
+  struct stat st;
+  if (stat(path->data, &st) != 0) return YV_NULLV;
+  char* full = _fullpath(NULL, path->data, 0);
+#else
+  char* full = realpath(path->data, NULL);
+#endif
+  if (!full) return YV_NULLV;
+  YisVal out = YV_STR(stdr_str_from_slice(full, strlen(full)));
+  free(full);
+  return out;
+}
+
+// Environment values are copied so callers own the resulting string.
+static YisVal stdr_getenv(YisVal namev) {
+  if (namev.tag != EVT_STR) yis_trap("getenv expects string name");
+  YisStr* name = (YisStr*)namev.as.p;
+  if (name->len == 0 || memchr(name->data, 0, name->len) ||
+      memchr(name->data, '=', name->len)) return YV_NULLV;
+  const char* value = getenv(name->data);
+  return value ? YV_STR(stdr_str_from_slice(value, strlen(value))) : YV_NULLV;
+}
+
+// Stable byte-based FNV-1a hash for cache identities; unsigned overflow is defined.
+static YisVal stdr_hash_text(YisVal textv) {
+  if (textv.tag != EVT_STR) yis_trap("hash_text expects string");
+  YisStr* text = (YisStr*)textv.as.p;
+  uint64_t hash = UINT64_C(14695981039346656037);
+  for (size_t i = 0; i < text->len; i++) {
+    hash ^= (unsigned char)text->data[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  char hex[17];
+  snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)hash);
+  return YV_STR(stdr_str_from_slice(hex, 16));
+}
+
+// Create the file exclusively before returning its path. The caller can replace
+// its contents or atomically rename it without choosing a shared temporary name.
+static YisVal stdr_temp_file(YisVal dirv, YisVal prefixv) {
+  if (dirv.tag != EVT_STR || prefixv.tag != EVT_STR)
+    yis_trap("temp_file expects directory and prefix strings");
+  YisStr* dir = (YisStr*)dirv.as.p;
+  YisStr* prefix = (YisStr*)prefixv.as.p;
+  if (dir->len == 0 || memchr(dir->data, 0, dir->len) ||
+      memchr(prefix->data, 0, prefix->len) ||
+      memchr(prefix->data, '/', prefix->len) ||
+      memchr(prefix->data, '\\', prefix->len)) return YV_NULLV;
+  bool sep = dir->data[dir->len - 1] != '/' && dir->data[dir->len - 1] != '\\';
+  size_t base = yis_size_add(yis_size_add(dir->len, sep ? 1 : 0), prefix->len);
+  char* path = (char*)yis_alloc(yis_size_add(base, 33));
+  memcpy(path, dir->data, dir->len);
+  if (sep) path[dir->len] = '/';
+  memcpy(path + dir->len + (sep ? 1 : 0), prefix->data, prefix->len);
+  int fd = -1;
+#if defined(_WIN32)
+  static unsigned long serial = 0;
+  for (int attempt = 0; attempt < 128; attempt++) {
+    snprintf(path + base, 33, "%08lx%08lx%08lx", (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetTickCount(), ++serial);
+    fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (fd >= 0 || errno != EEXIST) break;
+  }
+  int closed = fd >= 0 ? _close(fd) : -1;
+#else
+  memcpy(path + base, "XXXXXX", 7);
+  fd = mkstemp(path);
+  int closed = fd >= 0 ? close(fd) : -1;
+#endif
+  if (fd < 0 || closed != 0) {
+    if (fd >= 0) remove(path);
+    free(path);
+    return YV_NULLV;
+  }
+  YisStr* result = stdr_str_from_slice(path, strlen(path));
+  free(path);
+  return YV_STR(result);
+}
+
 static YisVal stdr_move_file(YisVal srcv, YisVal dstv) {
   if (srcv.tag != EVT_STR) yis_trap("move_file expects source path string");
   if (dstv.tag != EVT_STR) yis_trap("move_file expects destination path string");
@@ -488,7 +626,7 @@ static char* stdr_join_path_c(const char* dir, const char* name) {
   size_t dl = strlen(dir);
   size_t nl = strlen(name);
   bool need_sep = (dl > 0 && dir[dl - 1] != '/');
-  size_t total = dl + (need_sep ? 1 : 0) + nl + 1;
+  size_t total = yis_size_add(yis_size_add(dl, nl), need_sep ? 2 : 1);
   char* out = (char*)malloc(total);
   if (!out) return NULL;
   memcpy(out, dir, dl);
@@ -607,7 +745,11 @@ static YisVal stdr_prune_files_older_than(YisVal dirv, YisVal daysv) {
 
   time_t now = time(NULL);
   if (now == (time_t)-1) return YV_INT(0);
-  int64_t cutoff = (int64_t)now - (days * 86400);
+  int64_t seconds;
+  int64_t cutoff;
+  if (__builtin_mul_overflow(days, INT64_C(86400), &seconds) ||
+      __builtin_sub_overflow((int64_t)now, seconds, &cutoff))
+    yis_trap("integer overflow");
   int64_t removed = 0;
 
 #if !defined(_WIN32)
@@ -655,7 +797,7 @@ static YisVal stdr_run_command(YisVal cmdv) {
   int c;
   while ((c = fgetc(p)) != EOF) {
     if (len + 1 >= cap) {
-      cap *= 2;
+      cap = yis_grow_capacity(cap, yis_size_add(len, 2), 1);
       char* n = (char*)realloc(buf, cap);
       if (!n) {
         free(buf);
@@ -997,9 +1139,9 @@ static YisVal stdr_save_file_dialog(YisVal promptv, YisVal default_namev, YisVal
 }
 
 static size_t stdr_find_sub(const char* s, size_t slen, const char* sub, size_t sublen, size_t start) {
+  if (start > slen || sublen > slen - start) return (size_t)-1;
   if (sublen == 0) return start;
-  if (start > slen) return (size_t)-1;
-  for (size_t i = start; i + sublen <= slen; i++) {
+  for (size_t i = start; i <= slen - sublen; i++) {
     if (memcmp(s + i, sub, sublen) == 0) return i;
   }
   return (size_t)-1;
@@ -1015,7 +1157,7 @@ static void stdr_trim_span(const char* s, size_t len, size_t* out_start, size_t*
 }
 
 static YisStr* stdr_str_from_slice(const char* s, size_t len) {
-  YisStr* st = (YisStr*)malloc(sizeof(YisStr) + len + 1);
+  YisStr* st = (YisStr*)yis_alloc(yis_size_add(sizeof(YisStr), yis_size_add(len, 1)));
   if (!st) yis_trap("out of memory");
   st->ref = 1;
   st->len = len;
@@ -1038,28 +1180,30 @@ static YisVal stdr_args(void) {
 static int64_t stdr_parse_int_slice(const char* s, size_t len) {
   if (len == 0) return 0;
   char stack[64];
-  char* tmp = (len < sizeof(stack)) ? stack : (char*)malloc(len + 1);
+  char* tmp = (len < sizeof(stack)) ? stack : (char*)malloc(yis_size_add(len, 1));
   if (!tmp) yis_trap("out of memory");
   memcpy(tmp, s, len);
   tmp[len] = 0;
   char* end = NULL;
   long long v = strtoll(tmp, &end, 10);
+  bool parsed = end != tmp;
   if (tmp != stack) free(tmp);
-  if (end == tmp) return 0;
+  if (!parsed) return 0;
   return (int64_t)v;
 }
 
 static double stdr_parse_float_slice(const char* s, size_t len) {
   if (len == 0) return 0.0;
   char stack[64];
-  char* tmp = (len < sizeof(stack)) ? stack : (char*)malloc(len + 1);
+  char* tmp = (len < sizeof(stack)) ? stack : (char*)malloc(yis_size_add(len, 1));
   if (!tmp) yis_trap("out of memory");
   memcpy(tmp, s, len);
   tmp[len] = 0;
   char* end = NULL;
   double v = strtod(tmp, &end);
+  bool parsed = end != tmp;
   if (tmp != stack) free(tmp);
-  if (end == tmp) return 0.0;
+  if (!parsed) return 0.0;
   return v;
 }
 
@@ -1094,6 +1238,7 @@ static YisVal stdr_readf_parse(YisVal fmt, YisVal line, YisVal args) {
   int segs = 1;
   for (size_t i = 0; i + 1 < flen; i++) {
     if (f[i] == '{' && f[i + 1] == '}') {
+      if (segs == INT_MAX) yis_trap("allocation size overflow");
       segs++;
       i++;
     }
@@ -1101,8 +1246,8 @@ static YisVal stdr_readf_parse(YisVal fmt, YisVal line, YisVal args) {
 
   const char* stack_ptrs[16];
   size_t stack_lens[16];
-  const char** seg_ptrs = (segs <= 16) ? stack_ptrs : (const char**)malloc(sizeof(char*) * segs);
-  size_t* seg_lens = (segs <= 16) ? stack_lens : (size_t*)malloc(sizeof(size_t) * segs);
+  const char** seg_ptrs = (segs <= 16) ? stack_ptrs : (const char**)malloc(yis_size_mul(sizeof(char*), (size_t)segs));
+  size_t* seg_lens = (segs <= 16) ? stack_lens : (size_t*)malloc(yis_size_mul(sizeof(size_t), (size_t)segs));
   if (!seg_ptrs || !seg_lens) yis_trap("out of memory");
 
   size_t seg_start = 0;
@@ -1196,12 +1341,12 @@ static YisStr* stdr_to_string(YisVal v) {
 static YisStr* stdr_str_from_parts(int n, YisVal* parts) {
   size_t total = 0;
   YisStr* stack_strs[16];
-  YisStr** strs = (n <= 16) ? stack_strs : (YisStr**)malloc(sizeof(YisStr*) * (size_t)n);
+  YisStr** strs = (n <= 16) ? stack_strs : (YisStr**)yis_alloc(yis_size_mul(sizeof(YisStr*), (size_t)n));
   for (int i = 0; i < n; i++) {
     strs[i] = stdr_to_string(parts[i]);
-    total += strs[i]->len;
+    total = yis_size_add(total, strs[i]->len);
   }
-  YisStr* out = (YisStr*)malloc(sizeof(YisStr) + total + 1);
+  YisStr* out = (YisStr*)yis_alloc(yis_size_add(sizeof(YisStr), yis_size_add(total, 1)));
   out->ref = 1;
   out->len = total;
   out->data = (char*)(out + 1);
@@ -1216,7 +1361,7 @@ static YisStr* stdr_str_from_parts(int n, YisVal* parts) {
   return out;
 }
 
-static void yis_retain_val(YisVal v) {
+static void yis_retain_heap(YisVal v) {
   if (v.tag == EVT_STR) { int* r = &((YisStr*)v.as.p)->ref; if (*r != INT32_MAX) (*r)++; }
   else if (v.tag == EVT_ARR) ((YisArr*)v.as.p)->ref++;
   else if (v.tag == EVT_DICT) ((YisDict*)v.as.p)->ref++;
@@ -1224,7 +1369,7 @@ static void yis_retain_val(YisVal v) {
   else if (v.tag == EVT_FN) ((YisFn*)v.as.p)->ref++;
 }
 
-static void yis_release_val(YisVal v) {
+static void yis_release_heap(YisVal v) {
   if (v.tag == EVT_STR) {
     YisStr* s = (YisStr*)v.as.p;
     if (s->ref == INT32_MAX) return;
@@ -1268,6 +1413,10 @@ static void yis_release_val(YisVal v) {
   }
 }
 
+static void yis_release_slot(YisVal* slot) {
+  yis_release_val(*slot);
+}
+
 static YisVal yis_move(YisVal* slot) {
   YisVal v = *slot;
   *slot = YV_NULLV;
@@ -1280,10 +1429,18 @@ static void yis_move_into(YisVal* slot, YisVal v) {
   *slot = v;
 }
 
+// The nearest double to INT64_MAX is +2^63, which is already out of range.
+// Check exact powers of two before converting; C float-to-int overflow is UB.
+static int64_t yis_float_to_int(double n) {
+  if (!isfinite(n) || n < -0x1p63 || n >= 0x1p63)
+    yis_trap("integer conversion out of range");
+  return (int64_t)n;
+}
+
 static int64_t yis_as_int(YisVal v) {
   if (v.tag == EVT_INT) return v.as.i;
   if (v.tag == EVT_BOOL) return v.as.b ? 1 : 0;
-  if (v.tag == EVT_FLOAT) return (int64_t)v.as.f;
+  if (v.tag == EVT_FLOAT) return yis_float_to_int(v.as.f);
   if (v.tag == EVT_NULL) return 0;
   if (v.tag == EVT_STR) {
     /* Coerce string to int when possible; otherwise 0 (avoids trap until codegen is fully audited) */
@@ -1366,32 +1523,51 @@ static bool yis_as_bool(YisVal v) {
 static YisVal yis_add(YisVal a, YisVal b) {
   if (a.tag == EVT_STR || b.tag == EVT_STR) return stdr_str_concat(a, b);
   if (a.tag == EVT_FLOAT || b.tag == EVT_FLOAT) return YV_FLOAT(yis_as_float(a) + yis_as_float(b));
-  return YV_INT(yis_as_int(a) + yis_as_int(b));
+  int64_t out;
+  if (__builtin_add_overflow(yis_as_int(a), yis_as_int(b), &out))
+    yis_trap("integer overflow");
+  return YV_INT(out);
 }
 
 static YisVal yis_sub(YisVal a, YisVal b) {
   if (a.tag == EVT_FLOAT || b.tag == EVT_FLOAT) return YV_FLOAT(yis_as_float(a) - yis_as_float(b));
-  return YV_INT(yis_as_int(a) - yis_as_int(b));
+  int64_t out;
+  if (__builtin_sub_overflow(yis_as_int(a), yis_as_int(b), &out))
+    yis_trap("integer overflow");
+  return YV_INT(out);
 }
 
 static YisVal yis_mul(YisVal a, YisVal b) {
   if (a.tag == EVT_FLOAT || b.tag == EVT_FLOAT) return YV_FLOAT(yis_as_float(a) * yis_as_float(b));
-  return YV_INT(yis_as_int(a) * yis_as_int(b));
+  int64_t out;
+  if (__builtin_mul_overflow(yis_as_int(a), yis_as_int(b), &out))
+    yis_trap("integer overflow");
+  return YV_INT(out);
 }
 
 static YisVal yis_div(YisVal a, YisVal b) {
   if (a.tag == EVT_FLOAT || b.tag == EVT_FLOAT) return YV_FLOAT(yis_as_float(a) / yis_as_float(b));
-  return YV_INT(yis_as_int(a) / yis_as_int(b));
+  int64_t lhs = yis_as_int(a);
+  int64_t rhs = yis_as_int(b);
+  if (rhs == 0) yis_trap("division by zero");
+  if (lhs == INT64_MIN && rhs == -1) yis_trap("integer overflow");
+  return YV_INT(lhs / rhs);
 }
 
 static YisVal yis_mod(YisVal a, YisVal b) {
   if (a.tag == EVT_FLOAT || b.tag == EVT_FLOAT) yis_trap("% expects integer");
-  return YV_INT(yis_as_int(a) % yis_as_int(b));
+  int64_t lhs = yis_as_int(a);
+  int64_t rhs = yis_as_int(b);
+  if (rhs == 0) yis_trap("division by zero");
+  if (lhs == INT64_MIN && rhs == -1) yis_trap("integer overflow");
+  return YV_INT(lhs % rhs);
 }
 
 static YisVal yis_neg(YisVal a) {
   if (a.tag == EVT_FLOAT) return YV_FLOAT(-a.as.f);
-  return YV_INT(-yis_as_int(a));
+  int64_t n = yis_as_int(a);
+  if (n == INT64_MIN) yis_trap("integer overflow");
+  return YV_INT(-n);
 }
 
 static YisVal yis_eq(YisVal a, YisVal b) {
@@ -1437,18 +1613,19 @@ static YisVal yis_ge(YisVal a, YisVal b) {
 }
 
 static YisArr* stdr_arr_new(int n) {
-  YisArr* a = (YisArr*)malloc(sizeof(YisArr));
+  YisArr* a = (YisArr*)yis_alloc(sizeof(YisArr));
   a->ref = 1;
   a->len = 0;
   a->cap = (n > 0) ? (size_t)n : 4;
-  a->items = (YisVal*)malloc(sizeof(YisVal) * a->cap);
+  a->items = (YisVal*)yis_alloc(yis_size_mul(sizeof(YisVal), a->cap));
   return a;
 }
 
 static void yis_arr_add(YisArr* a, YisVal v) {
   if (a->len >= a->cap) {
-    a->cap *= 2;
-    a->items = (YisVal*)realloc(a->items, sizeof(YisVal) * a->cap);
+    size_t cap = yis_grow_capacity(a->cap, yis_size_add(a->len, 1), sizeof(YisVal));
+    a->items = (YisVal*)yis_realloc(a->items, yis_size_mul(sizeof(YisVal), cap));
+    a->cap = cap;
   }
   a->items[a->len++] = v;
 }
@@ -1491,21 +1668,22 @@ static YisVal yis_arr_get(YisArr* a, int64_t idx) {
 }
 
 static void yis_arr_set(YisArr* a, int64_t idx, YisVal v) {
+  if (!a) yis_trap("array index on null");
   if (idx < 0) return;
+  if ((uint64_t)idx > SIZE_MAX - 1) yis_trap("allocation size overflow");
   size_t uidx = (size_t)idx;
   if (uidx >= a->len) {
     if (uidx >= a->cap) {
-      size_t new_cap = a->cap ? a->cap : 4;
-      while (new_cap <= uidx) new_cap *= 2;
-      a->items = (YisVal*)realloc(a->items, sizeof(YisVal) * new_cap);
+      size_t new_cap = yis_grow_capacity(a->cap, yis_size_add(uidx, 1), sizeof(YisVal));
+      a->items = (YisVal*)yis_realloc(a->items, yis_size_mul(sizeof(YisVal), new_cap));
       a->cap = new_cap;
     }
     for (size_t i = a->len; i <= uidx; i++) a->items[i] = YV_NULLV;
     a->len = uidx + 1;
-  } else {
-    yis_release_val(a->items[uidx]);
   }
+  // The incoming value may be borrowed from the slot being overwritten.
   yis_retain_val(v);
+  yis_release_val(a->items[uidx]);
   a->items[uidx] = v;
 }
 
@@ -1525,11 +1703,11 @@ static int yis_str_cmp(YisStr* a, YisStr* b) {
 }
 
 static YisDict* stdr_dict_new(void) {
-  YisDict* d = (YisDict*)malloc(sizeof(YisDict));
+  YisDict* d = (YisDict*)yis_alloc(sizeof(YisDict));
   d->ref = 1;
   d->len = 0;
   d->cap = 8;
-  d->entries = (YisDictEnt*)malloc(sizeof(YisDictEnt) * d->cap);
+  d->entries = (YisDictEnt*)yis_alloc(yis_size_mul(sizeof(YisDictEnt), d->cap));
   return d;
 }
 
@@ -1545,8 +1723,9 @@ static void yis_dict_set(YisDict* d, YisVal key, YisVal val) {
     }
   }
   if (d->len >= d->cap) {
-    d->cap *= 2;
-    d->entries = (YisDictEnt*)realloc(d->entries, sizeof(YisDictEnt) * d->cap);
+    size_t cap = yis_grow_capacity(d->cap, yis_size_add(d->len, 1), sizeof(YisDictEnt));
+    d->entries = (YisDictEnt*)yis_realloc(d->entries, yis_size_mul(sizeof(YisDictEnt), cap));
+    d->cap = cap;
   }
   yis_retain_val(key);
   yis_retain_val(val);
@@ -1577,14 +1756,14 @@ static int yis_dict_len(YisDict* d) {
 }
 
 static YisObj* yis_obj_new(size_t size, void (*drop)(YisObj*)) {
-  YisObj* o = (YisObj*)malloc(size);
+  YisObj* o = (YisObj*)yis_alloc(size);
   o->ref = 1;
   o->drop = drop;
   return o;
 }
 
 static YisRef* yis_ref_new(void) {
-  YisRef* r = (YisRef*)malloc(sizeof(YisRef));
+  YisRef* r = (YisRef*)yis_alloc(sizeof(YisRef));
   if (!r) yis_trap("out of memory");
   r->ref = 1;
   r->val = YV_NULLV;
@@ -1604,7 +1783,7 @@ static void yis_ref_release(YisRef* r) {
 }
 
 static YisFn* yi_fn_new(YisVal (*fn)(void* env, int argc, YisVal* argv), int arity) {
-  YisFn* f = (YisFn*)malloc(sizeof(YisFn));
+  YisFn* f = (YisFn*)yis_alloc(sizeof(YisFn));
   f->ref = 1;
   f->arity = arity;
   f->fn = fn;
@@ -1614,7 +1793,7 @@ static YisFn* yi_fn_new(YisVal (*fn)(void* env, int argc, YisVal* argv), int ari
 }
 
 static YisFn* yi_fn_new_with_env(YisVal (*fn)(void* env, int argc, YisVal* argv), int arity, void* env, int env_size) {
-  YisFn* f = (YisFn*)malloc(sizeof(YisFn));
+  YisFn* f = (YisFn*)yis_alloc(sizeof(YisFn));
   f->ref = 1;
   f->arity = arity;
   f->fn = fn;
@@ -1667,13 +1846,13 @@ static YisVal stdr_char_from_code(YisVal cv) {
 }
 
 static YisVal stdr_floor(YisVal v) {
-  double x = (v.tag == EVT_FLOAT) ? v.as.f : (double)yis_as_int(v);
-  return YV_INT((int64_t)floor(x));
+  if (v.tag != EVT_FLOAT) return YV_INT(yis_as_int(v));
+  return YV_INT(yis_float_to_int(floor(v.as.f)));
 }
 
 static YisVal stdr_ceil(YisVal v) {
-  double x = (v.tag == EVT_FLOAT) ? v.as.f : (double)yis_as_int(v);
-  return YV_INT((int64_t)ceil(x));
+  if (v.tag != EVT_FLOAT) return YV_INT(yis_as_int(v));
+  return YV_INT(yis_float_to_int(ceil(v.as.f)));
 }
 
 static YisVal stdr_keys(YisVal dv) {
@@ -1696,16 +1875,16 @@ static YisVal stdr_replace(YisVal textv, YisVal fromv, YisVal tov) {
   YisStr* from = (YisStr*)fromv.as.p;
   YisStr* to = (YisStr*)tov.as.p;
   if (from->len == 0) { yis_retain_val(textv); return textv; }
-  size_t cap = text->len + 64;
+  size_t cap = yis_size_add(text->len, 64);
   char* buf = (char*)malloc(cap);
   if (!buf) yis_trap("out of memory");
   size_t out_len = 0;
   size_t i = 0;
-  while (i + from->len <= text->len) {
+  while (from->len <= text->len - i) {
     if (memcmp(text->data + i, from->data, from->len) == 0) {
-      size_t need = out_len + to->len;
+      size_t need = yis_size_add(out_len, to->len);
       if (need >= cap) {
-        while (need >= cap) cap *= 2;
+        cap = yis_grow_capacity(cap, yis_size_add(need, 1), 1);
         buf = (char*)realloc(buf, cap);
         if (!buf) yis_trap("out of memory");
       }
@@ -1713,8 +1892,8 @@ static YisVal stdr_replace(YisVal textv, YisVal fromv, YisVal tov) {
       out_len += to->len;
       i += from->len;
     } else {
-      if (out_len + 1 >= cap) {
-        cap *= 2;
+      if (yis_size_add(out_len, 1) >= cap) {
+        cap = yis_grow_capacity(cap, yis_size_add(out_len, 2), 1);
         buf = (char*)realloc(buf, cap);
         if (!buf) yis_trap("out of memory");
       }
@@ -1723,8 +1902,9 @@ static YisVal stdr_replace(YisVal textv, YisVal fromv, YisVal tov) {
   }
   size_t tail = text->len - i;
   if (tail > 0) {
-    if (out_len + tail >= cap) {
-      cap = out_len + tail + 1;
+    size_t need = yis_size_add(out_len, tail);
+    if (need >= cap) {
+      cap = yis_size_add(need, 1);
       buf = (char*)realloc(buf, cap);
       if (!buf) yis_trap("out of memory");
     }

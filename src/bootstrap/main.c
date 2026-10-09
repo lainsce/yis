@@ -12,6 +12,7 @@
 #else
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #define yis_getcwd getcwd
 #define yis_mkdir(path) mkdir((path), 0755)
 #endif
@@ -26,7 +27,7 @@
 #include "str.h"
 #include "typecheck.h"
 
-#define YIS_CACHE_VERSION "yis-cache-v2"
+#define YIS_CACHE_VERSION "yis-cache-v3"
 
 static uint64_t hash_update(uint64_t h, const void *data, size_t len) {
     const unsigned char *p = (const unsigned char *)data;
@@ -42,6 +43,21 @@ static uint64_t hash_cstr(uint64_t h, const char *s) {
         return hash_update(h, "", 0);
     }
     return hash_update(h, s, strlen(s));
+}
+
+static bool hash_file_contents(uint64_t *hash, const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    uint64_t value = *hash;
+    unsigned char buffer[16384];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        value = hash_update(value, buffer, count);
+    }
+    bool ok = !ferror(file);
+    fclose(file);
+    if (ok) *hash = value;
+    return ok;
 }
 
 static char *dup_cstr(const char *s) {
@@ -543,6 +559,13 @@ static int compile_c_with_translated_errors(const char *cmd) {
         buf_len += ll;
     }
     int rc = pclose(fp);
+#if !defined(_WIN32)
+    if (rc != -1) {
+        if (WIFEXITED(rc)) rc = WEXITSTATUS(rc);
+        else if (WIFSIGNALED(rc)) rc = 128 + WTERMSIG(rc);
+        else rc = 1;
+    }
+#endif
     if (buf) buf[buf_len] = '\0';
 
     // If compilation succeeded, clean up and return
@@ -906,6 +929,25 @@ int main(int argc, char **argv) {
         bool cache_enabled = true;
         if (no_cache_env && no_cache_env[0]) {
             cache_enabled = (no_cache_env[0] == '0');
+        }
+        if (cache_enabled) {
+            char *compiler_path = yis_exe_path();
+            build_hash = hash_cstr(build_hash, "bootstrap-executable");
+            if (!compiler_path || !hash_file_contents(&build_hash, compiler_path)) {
+                // A cache without the generator's identity could serve stale C.
+                cache_enabled = false;
+            }
+            free(compiler_path);
+            if (cache_enabled) {
+                build_hash = hash_cstr(build_hash, "expanded-runtime");
+                if (!codegen_runtime_hash(&build_hash, &err)) {
+                    diag_print_enhanced(&err, verbose_mode);
+                    free(ext_bindings_alloc);
+                    free(ext_packager_alloc);
+                    arena_free(&arena);
+                    return 1;
+                }
+            }
         }
 
         char *cache_base = NULL;

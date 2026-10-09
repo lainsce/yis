@@ -18,6 +18,7 @@ def ?g_interfaces = []: [string => any]
 -- Module cache: resolved paths and parsed ASTs (avoid re-reading/re-parsing)
 def ?g_path_cache = []: [string => any]
 def ?g_ast_cache = []: [string => any]
+def ?g_source_hashes = []: [string => any]
 def ?g_env_cache = []: [string => any]
 def ?g_scope_names = []: [string => any]
 def ?g_scope_order = []: [any]
@@ -40,6 +41,7 @@ def ?g_diag_source_cache = []: [string => any]
 def ?g_flat_names = []: [any]
 def ?g_flat_exprs = []: [any]
 def ?g_flat_counter = 0
+def ?g_def_init_modules = []: [any]
 
 -- ============================================================
 -- C code emitter: walks AST and produces C using the Yis runtime.
@@ -203,7 +205,7 @@ def ?g_flat_counter = 0
 ;
 
 : _c_quote(text = string) (( string ))
-  let hex = "0123456789ABCDEF"
+  let octal = "01234567"
   let ?parts = []: [any]
   stdr.push(parts, "\"")
   let n = stdr.len(text)
@@ -211,28 +213,6 @@ def ?g_flat_counter = 0
   let ?i = 0
   for (; i < n; i = i + 1)
     let code = stdr.char_code(stdr.slice(text, i, i + 1))
-    -- Handle \u{XXXX} unicode escape → UTF-8 \xNN sequences for C
-    if code == 92 && i + 1 < n
-      let uc = stdr.slice(text, i + 1, i + 2)
-      if uc == "u" && i + 2 < n && stdr.slice(text, i + 2, i + 3) == "{"
-        let ?j = i + 3
-        let ?value = 0
-        let ?digits = 0
-        let ?ok = true
-        for (; j < n; )
-          let ch = stdr.slice(text, j, j + 1)
-          if ch == "}" { break }
-          let hv = _hex_val(ch)
-          if hv < 0 { ok = false; break }
-          value = value * 16 + hv
-          digits = digits + 1
-          j = j + 1
-        if ok && digits > 0 && j < n && stdr.slice(text, j, j + 1) == "}"
-          if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
-          stdr.push(parts, _utf8_hex_escape(value, hex))
-          i = j
-          chunk_start = j + 1
-          continue
     let ?esc = ""
     if code == 10 { esc = "\\n" }
     elif code == 9 { esc = "\\t" }
@@ -241,14 +221,14 @@ def ?g_flat_counter = 0
     elif code == 8 { esc = "\\b" }
     elif code == 11 { esc = "\\v" }
     elif code == 12 { esc = "\\f" }
-    elif code == 27 { esc = "\\x1B" }
     elif code < 32 || code == 127
-      let hi = code / 16
-      let lo = code - hi * 16
-      let ?hx = "\\x"
-      hx = stdr.str_concat(hx, stdr.slice(hex, hi, hi + 1))
-      hx = stdr.str_concat(hx, stdr.slice(hex, lo, lo + 1))
-      esc = hx
+      -- C octal escapes have a fixed maximum width; following digits stay literal.
+      let high = code / 64
+      let middle = code / 8 - high * 8
+      let low = code - (code / 8) * 8
+      esc = stdr.str_concat("\\", stdr.slice(octal, high, high + 1))
+      esc = stdr.str_concat(esc, stdr.slice(octal, middle, middle + 1))
+      esc = stdr.str_concat(esc, stdr.slice(octal, low, low + 1))
     elif code == 92 || code == 34
       if chunk_start < i { stdr.push(parts, stdr.slice(text, chunk_start, i)) }
       stdr.push(parts, "\\")
@@ -1140,6 +1120,7 @@ def ?g_flat_counter = 0
   if stdr.is_null(toks) { <- null }
 
   let parsed = parser.parse_expr(toks, 0, 0)
+  if parser.has_errors() { stdr.exit_process(1) }
   let expr = parsed[1]
   if stdr.is_null(expr) { <- null }
 
@@ -1724,6 +1705,9 @@ def ?g_flat_counter = 0
   if stdr.is_null(e) { <- false }
   let tag = "tag"
   let et = e[tag] ?? ""
+  if et == "bang_call"
+    let key = stdr.str_concat(stdr.str_concat(cask_name, "."), e["name"] ?? "")
+    <- !stdr.is_null(g_fun_voids[key])
   if et != "call" { <- false }
   let func = e["func"]
   let ft = func[tag] ?? ""
@@ -1858,6 +1842,53 @@ def ?g_flat_counter = 0
 -- Emit a C expression string from an expr AST node.
 -- Returns a C expression string (of type YisVal).
 : emit_expr(e = any, cask_name = string) (( string ))
+  -- Keep temporaries inside the expression which evaluates them. Hoisting them
+  -- to a statement changes short-circuiting and evaluates loop inputs once.
+  let prev_names = g_flat_names
+  let prev_exprs = g_flat_exprs
+  g_flat_names = []: [any]
+  g_flat_exprs = []: [any]
+  let code = emit_expr_core(e, cask_name)
+  let decls = flat_decls("  ")
+  let releases = flat_releases("  ")
+  g_flat_names = prev_names
+  g_flat_exprs = prev_exprs
+  if stdr.len(decls) == 0 { <- code }
+  let ?out = stdr.str_concat("({\n", decls)
+  if call_returns_void(e, cask_name)
+    out = stdr.str_concat(out, "  (void)(")
+    out = stdr.str_concat(out, code)
+    out = stdr.str_concat(out, ");\n")
+    out = stdr.str_concat(out, releases)
+    out = stdr.str_concat(out, "  YV_NULLV; })")
+  else
+    out = stdr.str_concat(out, "  YisVal __ev_result = ")
+    out = stdr.str_concat(out, code)
+    out = stdr.str_concat(out, ";\n")
+    out = stdr.str_concat(out, releases)
+    out = stdr.str_concat(out, "  __ev_result; })")
+  <- out
+;
+
+-- Convert a borrowed expression into an owned reference at its evaluation site.
+-- Consume a condition's owned reference at each evaluation, including loops.
+: emit_condition(e = any, cask_name = string) (( string ))
+  let ?r = "({ YisVal __condition = "
+  r = stdr.str_concat(r, emit_owned_expr(e, cask_name))
+  r = stdr.str_concat(r, "; bool __truth = yis_as_bool(__condition); yis_release_val(__condition); YV_BOOL(__truth); })")
+  <- r
+;
+
+: emit_owned_expr(e = any, cask_name = string) (( string ))
+  let code = emit_expr(e, cask_name)
+  if is_fresh_expr(e) { <- code }
+  let ?r = "({ YisVal __borrowed = "
+  r = stdr.str_concat(r, code)
+  r = stdr.str_concat(r, "; yis_retain_val(__borrowed); __borrowed; })")
+  <- r
+;
+
+: emit_expr_core(e = any, cask_name = string) (( string ))
   if stdr.is_null(e) { <- "YV_NULLV" }
   let tag = "tag"
   let et = e[tag] ?? ""
@@ -1865,6 +1896,8 @@ def ?g_flat_counter = 0
   if et == "int"
     let vk = "value"
     let v = e[vk] ?? "0"
+    if stdr.str(v) == "-9223372036854775808"
+      <- "YV_INT((-9223372036854775807LL - 1))"
     let ?r = "YV_INT("
     r = stdr.str_concat(r, stdr.str(v))
     r = stdr.str_concat(r, ")")
@@ -1891,8 +1924,10 @@ def ?g_flat_counter = 0
     let vk = "value"
     let v = e[vk] ?? ""
     -- Emit YV_STR(stdr_str_lit("..."))
-    let ?r = "YV_STR(stdr_str_lit("
+    let ?r = "YV_STR(stdr_str_from_slice("
     r = stdr.str_concat(r, _c_quote(v))
+    r = stdr.str_concat(r, ", ")
+    r = stdr.str_concat(r, stdr.str(stdr.len(v)))
     r = stdr.str_concat(r, "))")
     <- r
 
@@ -1911,19 +1946,22 @@ def ?g_flat_counter = 0
       let part = iparts[pi]
       let pkind = part["kind"] ?? ""
       let pval = part["val"] ?? ""
-      let ?interp_expr = interp_expr_to_ast(pval)
+      let ?interp_expr = null
+      if pkind != "text" { interp_expr = interp_expr_to_ast(pval) }
       r = stdr.str_concat(r, "__ip[")
       r = stdr.str_concat(r, stdr.str(pi))
       r = stdr.str_concat(r, "] = ")
       if pkind == "text"
-        r = stdr.str_concat(r, "YV_STR(stdr_str_lit(")
+        r = stdr.str_concat(r, "YV_STR(stdr_str_from_slice(")
         r = stdr.str_concat(r, _c_quote(pval))
+        r = stdr.str_concat(r, ", ")
+        r = stdr.str_concat(r, stdr.str(stdr.len(pval)))
         r = stdr.str_concat(r, "))")
       else
         -- expr part: parse and compile full expression inside $$...$$.
         if !stdr.is_null(interp_expr)
           r = stdr.str_concat(r, "YV_STR(stdr_to_string(")
-          r = stdr.str_concat(r, emit_expr(interp_expr, cask_name))
+          r = stdr.str_concat(r, emit_flat_arg(interp_expr, emit_expr(interp_expr, cask_name)))
           r = stdr.str_concat(r, "))")
         elif stdr.is_null(interp_path_to_c(pval))
           -- Backward-compatible fallback for malformed interpolation bodies.
@@ -1935,9 +1973,15 @@ def ?g_flat_counter = 0
           r = stdr.str_concat(r, interp_path_to_c(pval))
           r = stdr.str_concat(r, "))")
       r = stdr.str_concat(r, "; ")
-    r = stdr.str_concat(r, "YV_STR(stdr_str_from_parts(")
+    r = stdr.str_concat(r, "YisVal __ip_result = YV_STR(stdr_str_from_parts(")
     r = stdr.str_concat(r, stdr.str(np))
-    r = stdr.str_concat(r, ", __ip)); })")
+    r = stdr.str_concat(r, ", __ip)); ")
+    let ?ri = 0
+    for (; ri < np; ri = ri + 1)
+      r = stdr.str_concat(r, "yis_release_val(__ip[")
+      r = stdr.str_concat(r, stdr.str(ri))
+      r = stdr.str_concat(r, "]); ")
+    r = stdr.str_concat(r, "__ip_result; })")
     <- r
 
   if et == "ident"
@@ -1976,7 +2020,7 @@ def ?g_flat_counter = 0
     let ok = "op"
     let rk = "operand"
     let op = e[ok] ?? ""
-    let operand = emit_expr(e[rk], cask_name)
+    let operand = emit_flat_arg(e[rk], emit_expr(e[rk], cask_name))
     if op == "bang"
       let ?r = "YV_BOOL(!yis_as_bool("
       r = stdr.str_concat(r, operand)
@@ -1999,8 +2043,24 @@ def ?g_flat_counter = 0
     let lk = "left"
     let rk = "right"
     let op = e[ok] ?? ""
-    let left = emit_expr(e[lk], cask_name)
-    let right = emit_expr(e[rk], cask_name)
+    if op == "qq"
+      let ?r = "({ YisVal __coalesce = "
+      r = stdr.str_concat(r, emit_owned_expr(e[lk], cask_name))
+      r = stdr.str_concat(r, "; if (__coalesce.tag == EVT_NULL) { yis_release_val(__coalesce); __coalesce = ")
+      r = stdr.str_concat(r, emit_owned_expr(e[rk], cask_name))
+      r = stdr.str_concat(r, "; } __coalesce; })")
+      <- r
+    if op == "ampamp" || op == "barbar"
+      let ?r = "({ YisVal __bool_left = "
+      r = stdr.str_concat(r, emit_owned_expr(e[lk], cask_name))
+      r = stdr.str_concat(r, "; bool __bool_result = yis_as_bool(__bool_left); yis_release_val(__bool_left); if (")
+      if op == "barbar" { r = stdr.str_concat(r, "!") }
+      r = stdr.str_concat(r, "__bool_result) { YisVal __bool_right = ")
+      r = stdr.str_concat(r, emit_owned_expr(e[rk], cask_name))
+      r = stdr.str_concat(r, "; __bool_result = yis_as_bool(__bool_right); yis_release_val(__bool_right); } YV_BOOL(__bool_result); })")
+      <- r
+    let left = emit_flat_arg(e[lk], emit_expr(e[lk], cask_name))
+    let right = emit_flat_arg(e[rk], emit_expr(e[rk], cask_name))
     if op == "plus" { <- emit_binop_call("yis_add", left, right) }
     if op == "minus" { <- emit_binop_call("yis_sub", left, right) }
     if op == "star" { <- emit_binop_call("yis_mul", left, right) }
@@ -2012,31 +2072,6 @@ def ?g_flat_counter = 0
     if op == "le" { <- emit_binop_call("yis_le", left, right) }
     if op == "gt" { <- emit_binop_call("yis_gt", left, right) }
     if op == "ge" { <- emit_binop_call("yis_ge", left, right) }
-    if op == "ampamp"
-      -- Short-circuit &&
-      let ?r = "YV_BOOL(yis_as_bool("
-      r = stdr.str_concat(r, left)
-      r = stdr.str_concat(r, ") && yis_as_bool(")
-      r = stdr.str_concat(r, right)
-      r = stdr.str_concat(r, "))")
-      <- r
-    if op == "barbar"
-      let ?r = "YV_BOOL(yis_as_bool("
-      r = stdr.str_concat(r, left)
-      r = stdr.str_concat(r, ") || yis_as_bool(")
-      r = stdr.str_concat(r, right)
-      r = stdr.str_concat(r, "))")
-      <- r
-    if op == "qq"
-      -- Null-coalescing: a ?? b -> (a.tag == EVT_NULL) ? b : a
-      let ?r = "(("
-      r = stdr.str_concat(r, left)
-      r = stdr.str_concat(r, ").tag == EVT_NULL ? (")
-      r = stdr.str_concat(r, right)
-      r = stdr.str_concat(r, ") : (")
-      r = stdr.str_concat(r, left)
-      r = stdr.str_concat(r, "))")
-      <- r
     <- "YV_NULLV"
 
   if et == "call"
@@ -2055,9 +2090,9 @@ def ?g_flat_counter = 0
       if !stdr.is_null(g_scope_names[fname])
         let ?fexpr = "v_"
         fexpr = stdr.str_concat(fexpr, fname)
-        <- emit_value_call(fexpr, args, cask_name)
+        <- emit_value_call(emit_flat_arg(func, fexpr), args, cask_name)
       if !stdr.is_null(g_global_def_names[fname]) || !stdr.is_null(g_def_types[fname])
-        <- emit_value_call(mangle_def(cask_name, fname), args, cask_name)
+        <- emit_value_call(emit_flat_arg(func, mangle_def(cask_name, fname)), args, cask_name)
       if fname == "write"
         let ?r = "stdr_write("
         r = emit_args(args, r, cask_name)
@@ -2142,9 +2177,9 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, "))")
         <- r
       if fname == "__slice"
-        let a0 = emit_expr(args[0], cask_name)
-        let a1 = emit_expr(args[1], cask_name)
-        let a2 = emit_expr(args[2], cask_name)
+        let a0 = emit_flat_arg(args[0], emit_expr(args[0], cask_name))
+        let a1 = emit_flat_arg(args[1], emit_expr(args[1], cask_name))
+        let a2 = emit_flat_arg(args[2], emit_expr(args[2], cask_name))
         let ?r = "stdr_slice("
         r = stdr.str_concat(r, a0)
         r = stdr.str_concat(r, ", yis_as_int(")
@@ -2200,6 +2235,12 @@ def ?g_flat_counter = 0
         <- r
       if fname == "__read_text_file"
         let ?r = "stdr_read_text_file("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        <- r
+      if fname == "__getenv" || fname == "__temp_file" || fname == "__hash_text" || fname == "__realpath"
+        let ?r = stdr.str_concat("stdr_", stdr.slice(fname, 2, stdr.len(fname)))
+        r = stdr.str_concat(r, "(")
         r = emit_args(args, r, cask_name)
         r = stdr.str_concat(r, ")")
         <- r
@@ -2357,7 +2398,7 @@ def ?g_flat_counter = 0
           r = stdr.str_concat(r, "->f_")
           r = stdr.str_concat(r, fn4)
           r = stdr.str_concat(r, ", ")
-          r = stdr.str_concat(r, emit_expr(args[ai], cask_name))
+          r = stdr.str_concat(r, emit_flat_arg(args[ai], emit_expr(args[ai], cask_name)))
           r = stdr.str_concat(r, ");\n")
         -- Wrap in YisVal
         r = stdr.str_concat(r, "    YisVal ")
@@ -2377,7 +2418,7 @@ def ?g_flat_counter = 0
           let ?ii2 = nf2
           for (; ii2 < na2; ii2 = ii2 + 1)
             r = stdr.str_concat(r, ", ")
-            r = stdr.str_concat(r, emit_expr(args[ii2], cask_name))
+            r = stdr.str_concat(r, emit_flat_arg(args[ii2], emit_expr(args[ii2], cask_name)))
           r = stdr.str_concat(r, ");\n")
         r = stdr.str_concat(r, "    ")
         r = stdr.str_concat(r, obj_var)
@@ -2394,7 +2435,7 @@ def ?g_flat_counter = 0
       r = stdr.str_concat(r, ")")
       <- r
     -- Fallback: any expression used as a function (e.g. dict["key"](args))
-    let fallback_fexpr = emit_expr(func, cask_name)
+    let fallback_fexpr = emit_flat_arg(func, emit_expr(func, cask_name))
     <- emit_value_call(fallback_fexpr, args, cask_name)
 
   if et == "bang_call"
@@ -2402,7 +2443,7 @@ def ?g_flat_counter = 0
     let rk = "recv"
     let mnk = "name"
     let ak = "args"
-    let recv_c = emit_expr(e[rk], cask_name)
+    let recv_c = emit_flat_arg(e[rk], emit_expr(e[rk], cask_name))
     let mname = e[mnk] ?? ""
     let bargs = e[ak] ?? []: [any]
     let ?r = mangle_name(cask_name, mname)
@@ -2412,7 +2453,7 @@ def ?g_flat_counter = 0
     let ?bi = 0
     for (; bi < nba; bi = bi + 1)
       r = stdr.str_concat(r, ", ")
-      r = stdr.str_concat(r, emit_expr(bargs[bi], cask_name))
+      r = stdr.str_concat(r, emit_flat_arg(bargs[bi], emit_expr(bargs[bi], cask_name)))
     r = stdr.str_concat(r, ")")
     <- r
 
@@ -2427,7 +2468,10 @@ def ?g_flat_counter = 0
     if mem_obj_tag == "ident"
       let mem_obj_name = dict_get_or(obj_raw, "name", "") ?? ""
       if !stdr.is_null(g_bring_names[mem_obj_name]) && mem_obj_name != cask_name
-        <- mangle_def(mem_obj_name, field)
+        let ?r = "({ YisVal __constant = "
+        r = stdr.str_concat(r, mangle_def(mem_obj_name, field))
+        r = stdr.str_concat(r, "; yis_retain_val(__constant); __constant; })")
+        <- r
     -- Check if receiver is a class with struct fields
     let mem_recv_type = type_of_expr(obj_raw, cask_name)
     let mem_cls_info = g_classes[mem_recv_type] ?? []: [string => any]
@@ -2437,7 +2481,7 @@ def ?g_flat_counter = 0
     if stdr.len(mem_fname) > 0
       -- Struct field access: ((YisObj_mod_Cls*)obj.as.p)->f_field
       let mem_cls_mod = mem_cls_info["mod"] ?? cask_name
-      let obj_c = emit_expr(e[ok], cask_name)
+      let obj_c = emit_flat_arg(e[ok], emit_expr(e[ok], cask_name))
       let ?r = "({\n    YisVal _mfr = ((YisObj_"
       r = stdr.str_concat(r, mem_cls_mod)
       r = stdr.str_concat(r, "_")
@@ -2448,19 +2492,23 @@ def ?g_flat_counter = 0
       r = stdr.str_concat(r, field)
       r = stdr.str_concat(r, ";\n    yis_retain_val(_mfr);\n    _mfr;\n})")
       <- r
-    let obj_c = emit_expr(e[ok], cask_name)
-    let ?r = "yis_dict_get((YisDict*)("
+    let obj_c = emit_flat_arg(e[ok], emit_expr(e[ok], cask_name))
+    let ?key_ast = []: [string => any]
+    key_ast["tag"] = "str"
+    key_ast["value"] = field
+    let key_c = emit_flat_arg(key_ast, emit_expr(key_ast, cask_name))
+    let ?r = "yis_dict_member_get("
     r = stdr.str_concat(r, obj_c)
-    r = stdr.str_concat(r, ").as.p, stdr_str_lit(\"")
-    r = stdr.str_concat(r, field)
-    r = stdr.str_concat(r, "\"))")
+    r = stdr.str_concat(r, ", ")
+    r = stdr.str_concat(r, key_c)
+    r = stdr.str_concat(r, ")")
     <- r
 
   if et == "index"
     let ok = "obj"
     let ik = "idx"
-    let obj_c = emit_expr(e[ok], cask_name)
-    let idx_c = emit_expr(e[ik], cask_name)
+    let obj_c = emit_flat_arg(e[ok], emit_expr(e[ok], cask_name))
+    let idx_c = emit_flat_arg(e[ik], emit_expr(e[ik], cask_name))
     -- Runtime dispatch: if index is int -> array, if string -> dict
     let ?r = "yis_index("
     r = stdr.str_concat(r, obj_c)
@@ -2470,77 +2518,65 @@ def ?g_flat_counter = 0
     <- r
 
   if et == "assign"
-    let lk = "lhs"
-    let rk = "rhs"
-    let lhs = e[lk]
-    let rhs_c = emit_expr(e[rk], cask_name)
-    let lhs_tag = lhs[tag] ?? ""
+    let lhs = e["lhs"]
+    let rhs = e["rhs"]
+    let lhs_tag = lhs["tag"] ?? ""
+    let ?slot = ""
+    let ?operation = ""
     if lhs_tag == "ident"
-      let nk = "name"
-      let name = lhs[nk] ?? ""
-      let ?lhs_cname = ""
+      let name = lhs["name"] ?? ""
       if !stdr.is_null(g_global_def_names[name]) && stdr.is_null(g_scope_names[name])
-        lhs_cname = mangle_def(cask_name, name)
+        slot = mangle_def(cask_name, name)
       else
-        lhs_cname = stdr.str_concat("v_", name)
-      let ?r = "(yis_move_into(&"
-      r = stdr.str_concat(r, lhs_cname)
+        slot = stdr.str_concat("v_", name)
+    elif lhs_tag == "index"
+      let obj_c = emit_flat_arg(lhs["obj"], emit_expr(lhs["obj"], cask_name))
+      let idx_c = emit_flat_arg(lhs["idx"], emit_expr(lhs["idx"], cask_name))
+      operation = stdr.str_concat("yis_index_set(", obj_c)
+      operation = stdr.str_concat(operation, ", ")
+      operation = stdr.str_concat(operation, idx_c)
+    elif lhs_tag == "member"
+      let obj = lhs["obj"]
+      let field = lhs["field"] ?? ""
+      let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
+      let recv_type = type_of_expr(obj, cask_name)
+      let cls = g_classes[recv_type] ?? []: [string => any]
+      let fields = cls["field_map"] ?? []: [string => any]
+      let finfo = fields[field] ?? []: [string => any]
+      if stdr.len(finfo["name"] ?? "") > 0
+        slot = stdr.str_concat("((YisObj_", cls["mod"] ?? cask_name)
+        slot = stdr.str_concat(slot, "_")
+        slot = stdr.str_concat(slot, recv_type)
+        slot = stdr.str_concat(slot, "*)")
+        slot = stdr.str_concat(slot, obj_c)
+        slot = stdr.str_concat(slot, ".as.p)->f_")
+        slot = stdr.str_concat(slot, field)
+      else
+        let ?key_ast = []: [string => any]
+        key_ast["tag"] = "str"
+        key_ast["value"] = field
+        let key_c = emit_flat_arg(key_ast, emit_expr(key_ast, cask_name))
+        operation = stdr.str_concat("yis_dict_member_set(", obj_c)
+        operation = stdr.str_concat(operation, ", ")
+        operation = stdr.str_concat(operation, key_c)
+    let rhs_c = emit_flat_arg(rhs, emit_expr(rhs, cask_name))
+    let ?r = "({ "
+    if stdr.len(slot) > 0
+      r = stdr.str_concat(r, "yis_move_into(&")
+      r = stdr.str_concat(r, slot)
+    elif stdr.len(operation) > 0
+      r = stdr.str_concat(r, operation)
+    else
+      r = stdr.str_concat(r, "(void)(")
+    if stdr.len(slot) > 0 || stdr.len(operation) > 0
       r = stdr.str_concat(r, ", ")
-      r = stdr.str_concat(r, rhs_c)
-      r = stdr.str_concat(r, "), ")
-      r = stdr.str_concat(r, lhs_cname)
-      r = stdr.str_concat(r, ")")
-      <- r
-    if lhs_tag == "index"
-      let ok = "obj"
-      let ik = "idx"
-      let obj_c = emit_expr(lhs[ok], cask_name)
-      let idx_c = emit_expr(lhs[ik], cask_name)
-      let ?r = "yis_index_set("
-      r = stdr.str_concat(r, obj_c)
-      r = stdr.str_concat(r, ", ")
-      r = stdr.str_concat(r, idx_c)
-      r = stdr.str_concat(r, ", ")
-      r = stdr.str_concat(r, rhs_c)
-      r = stdr.str_concat(r, ")")
-      <- r
-    if lhs_tag == "member"
-      let ok = "obj"
-      let fk = "field"
-      let lhs_obj_raw = lhs[ok]
-      let field = lhs[fk] ?? ""
-      -- Check if receiver is a class with struct fields
-      let asgn_recv_type = type_of_expr(lhs_obj_raw, cask_name)
-      let asgn_cls_info = g_classes[asgn_recv_type] ?? []: [string => any]
-      let asgn_fmap = asgn_cls_info["field_map"] ?? []: [string => any]
-      let asgn_finfo = asgn_fmap[field] ?? []: [string => any]
-      let asgn_fname = asgn_finfo["name"] ?? ""
-      if stdr.len(asgn_fname) > 0
-        -- Struct field write: yis_move_into(&((YisObj_mod_Cls*)obj.as.p)->f_field, value)
-        let asgn_cls_mod = asgn_cls_info["mod"] ?? cask_name
-        let obj_c = emit_expr(lhs_obj_raw, cask_name)
-        let ?r = "yis_move_into(&((YisObj_"
-        r = stdr.str_concat(r, asgn_cls_mod)
-        r = stdr.str_concat(r, "_")
-        r = stdr.str_concat(r, asgn_recv_type)
-        r = stdr.str_concat(r, "*)(")
-        r = stdr.str_concat(r, obj_c)
-        r = stdr.str_concat(r, ").as.p)->f_")
-        r = stdr.str_concat(r, field)
-        r = stdr.str_concat(r, ", ")
-        r = stdr.str_concat(r, rhs_c)
-        r = stdr.str_concat(r, ")")
-        <- r
-      let obj_c = emit_expr(lhs_obj_raw, cask_name)
-      let ?r = "yis_dict_set((YisDict*)("
-      r = stdr.str_concat(r, obj_c)
-      r = stdr.str_concat(r, ").as.p, stdr_str_lit(\"")
-      r = stdr.str_concat(r, field)
-      r = stdr.str_concat(r, "\"), ")
-      r = stdr.str_concat(r, rhs_c)
-      r = stdr.str_concat(r, ")")
-      <- r
-    <- rhs_c
+    r = stdr.str_concat(r, rhs_c)
+    r = stdr.str_concat(r, "); yis_retain_val(")
+    r = stdr.str_concat(r, rhs_c)
+    r = stdr.str_concat(r, "); ")
+    r = stdr.str_concat(r, rhs_c)
+    r = stdr.str_concat(r, "; })")
+    <- r
 
   if et == "array"
     let ek = "elems"
@@ -2556,9 +2592,9 @@ def ?g_flat_counter = 0
     let ck = "cond"
     let tk = "then"
     let ek = "else"
-    let cond_c = emit_expr(e[ck], cask_name)
-    let then_c = emit_expr(e[tk], cask_name)
-    let else_c = emit_expr(e[ek], cask_name)
+    let cond_c = emit_flat_arg(e[ck], emit_expr(e[ck], cask_name))
+    let then_c = emit_owned_expr(e[tk], cask_name)
+    let else_c = emit_owned_expr(e[ek], cask_name)
     let ?r = "(yis_as_bool("
     r = stdr.str_concat(r, cond_c)
     r = stdr.str_concat(r, ") ? (")
@@ -2571,7 +2607,7 @@ def ?g_flat_counter = 0
   if et == "match"
     let sk = "scrut"
     let ak = "arms"
-    let scrut_c = emit_expr(e[sk], cask_name)
+    let scrut_c = emit_owned_expr(e[sk], cask_name)
     let arms = e[ak] ?? []: [any]
     let narms = stdr.len(arms)
     -- Use GCC statement expression: ({ ... })
@@ -2586,7 +2622,7 @@ def ?g_flat_counter = 0
       let ptag = pat[tag] ?? ""
       if ptag == "pat_wild"
         r = stdr.str_concat(r, "  if (!__matched) { __matched = 1; __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; }\n")
       elif ptag == "pat_ident"
         let pname = pat["name"] ?? ""
@@ -2595,23 +2631,28 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, " = __scrut; yis_retain_val(v_")
         r = stdr.str_concat(r, pname)
         r = stdr.str_concat(r, "); __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; yis_release_val(v_")
         r = stdr.str_concat(r, pname)
         r = stdr.str_concat(r, "); }\n")
       elif ptag == "pat_int"
         let pval = pat["value"] ?? "0"
         r = stdr.str_concat(r, "  if (!__matched && yis_as_bool(yis_eq(__scrut, YV_INT(")
-        r = stdr.str_concat(r, pval)
+        if pval == "-9223372036854775808"
+          r = stdr.str_concat(r, "(-9223372036854775807LL - 1)")
+        else
+          r = stdr.str_concat(r, pval)
         r = stdr.str_concat(r, ")))) { __matched = 1; __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; }\n")
       elif ptag == "pat_str"
         let pval = pat["value"] ?? ""
-        r = stdr.str_concat(r, "  if (!__matched && yis_as_bool(yis_eq(__scrut, YV_STR(stdr_str_lit(\"")
-        r = stdr.str_concat(r, pval)
-        r = stdr.str_concat(r, "\"))))) { __matched = 1; __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, "  if (!__matched && ({ YisVal __pat = YV_STR(stdr_str_from_slice(")
+        r = stdr.str_concat(r, _c_quote(pval))
+        r = stdr.str_concat(r, ", ")
+        r = stdr.str_concat(r, stdr.str(stdr.len(pval)))
+        r = stdr.str_concat(r, ")); bool __equal = yis_as_bool(yis_eq(__scrut, __pat)); yis_release_val(__pat); __equal; })) { __matched = 1; __mres = ")
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; }\n")
       elif ptag == "pat_bool"
         let pval = pat["value"]
@@ -2620,11 +2661,11 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, "  if (!__matched && yis_as_bool(yis_eq(__scrut, YV_BOOL(")
         r = stdr.str_concat(r, bstr)
         r = stdr.str_concat(r, ")))) { __matched = 1; __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; }\n")
       elif ptag == "pat_null"
         r = stdr.str_concat(r, "  if (!__matched && __scrut.tag == EVT_NULL) { __matched = 1; __mres = ")
-        r = stdr.str_concat(r, emit_expr(arm_expr, cask_name))
+        r = stdr.str_concat(r, emit_owned_expr(arm_expr, cask_name))
         r = stdr.str_concat(r, "; }\n")
     r = stdr.str_concat(r, "  yis_release_val(__scrut); __mres; })")
     <- r
@@ -2689,8 +2730,8 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, ")")
         <- r
       if field == "push"
-        let a0 = emit_expr(args[0], cask_name)
-        let a1 = emit_expr(args[1], cask_name)
+        let a0 = emit_flat_arg(args[0], emit_expr(args[0], cask_name))
+        let a1 = emit_flat_arg(args[1], emit_expr(args[1], cask_name))
         let ?r = "stdr_push("
         r = stdr.str_concat(r, a0)
         r = stdr.str_concat(r, ", ")
@@ -2698,9 +2739,9 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, ")")
         <- r
       if field == "slice"
-        let a0 = emit_expr(args[0], cask_name)
-        let a1 = emit_expr(args[1], cask_name)
-        let a2 = emit_expr(args[2], cask_name)
+        let a0 = emit_flat_arg(args[0], emit_expr(args[0], cask_name))
+        let a1 = emit_flat_arg(args[1], emit_expr(args[1], cask_name))
+        let a2 = emit_flat_arg(args[2], emit_expr(args[2], cask_name))
         let ?r = "stdr_slice("
         r = stdr.str_concat(r, a0)
         r = stdr.str_concat(r, ", yis_as_int(")
@@ -2710,8 +2751,8 @@ def ?g_flat_counter = 0
         r = stdr.str_concat(r, "))")
         <- r
       if field == "str_at"
-        let a0 = emit_expr(args[0], cask_name)
-        let a1 = emit_expr(args[1], cask_name)
+        let a0 = emit_flat_arg(args[0], emit_expr(args[0], cask_name))
+        let a1 = emit_flat_arg(args[1], emit_expr(args[1], cask_name))
         let ?r = "stdr_str_at("
         r = stdr.str_concat(r, a0)
         r = stdr.str_concat(r, ", yis_as_int(")
@@ -2785,7 +2826,7 @@ def ?g_flat_counter = 0
             r = stdr.str_concat(r, "->f_")
             r = stdr.str_concat(r, xm_fn)
             r = stdr.str_concat(r, ", ")
-            r = stdr.str_concat(r, emit_expr(args[xm_fi], cask_name))
+            r = stdr.str_concat(r, emit_flat_arg(args[xm_fi], emit_expr(args[xm_fi], cask_name)))
             r = stdr.str_concat(r, ");\n")
           else
             r = stdr.str_concat(r, " = YV_NULLV;\n")
@@ -2804,7 +2845,7 @@ def ?g_flat_counter = 0
           let ?xm_ii = xm_nf
           for (; xm_ii < xm_na; xm_ii = xm_ii + 1)
             r = stdr.str_concat(r, ", ")
-            r = stdr.str_concat(r, emit_expr(args[xm_ii], cask_name))
+            r = stdr.str_concat(r, emit_flat_arg(args[xm_ii], emit_expr(args[xm_ii], cask_name)))
           r = stdr.str_concat(r, ");\n")
         r = stdr.str_concat(r, "    ")
         r = stdr.str_concat(r, xm_var)
@@ -2834,7 +2875,7 @@ def ?g_flat_counter = 0
 
         let cls_methods = dict_get_or(cls_any, "methods", null)
         if !stdr.is_null(dict_get_or(cls_methods, field, null))
-          let obj_c = emit_expr(obj, cask_name)
+          let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
           let ?r = mangle_method(cls_mod, vtype, field)
           r = stdr.str_concat(r, "(")
           r = stdr.str_concat(r, obj_c)
@@ -2847,7 +2888,7 @@ def ?g_flat_counter = 0
         if stdr.len(cls_mod) > 0
           let mod_funs = dict_get_or(g_mod_funs, cls_mod, null)
           if !stdr.is_null(dict_get_or(mod_funs, field, null))
-            let obj_c = emit_expr(obj, cask_name)
+            let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
             let ?r = mangle_name(cls_mod, field)
             r = stdr.str_concat(r, "(")
             r = stdr.str_concat(r, obj_c)
@@ -2859,7 +2900,7 @@ def ?g_flat_counter = 0
 
     let local_funs = dict_get_or(g_mod_funs, cask_name, null)
     if !stdr.is_null(dict_get_or(local_funs, field, null))
-      let obj_c = emit_expr(obj, cask_name)
+      let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
       let ?r = mangle_name(cask_name, field)
       r = stdr.str_concat(r, "(")
       r = stdr.str_concat(r, obj_c)
@@ -2886,7 +2927,7 @@ def ?g_flat_counter = 0
 
       let cls_methods = dict_get_or(cls_info, "methods", null)
       if !stdr.is_null(dict_get_or(cls_methods, field, null))
-        let obj_c = emit_expr(obj, cask_name)
+        let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
         let ?r = mangle_method(cls_mod, expr_type, field)
         r = stdr.str_concat(r, "(")
         r = stdr.str_concat(r, obj_c)
@@ -2899,7 +2940,7 @@ def ?g_flat_counter = 0
       if stdr.len(cls_mod) > 0
         let mod_funs = dict_get_or(g_mod_funs, cls_mod, null)
         if !stdr.is_null(dict_get_or(mod_funs, field, null))
-          let obj_c = emit_expr(obj, cask_name)
+          let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
           let ?r = mangle_name(cls_mod, field)
           r = stdr.str_concat(r, "(")
           r = stdr.str_concat(r, obj_c)
@@ -2909,7 +2950,7 @@ def ?g_flat_counter = 0
           r = stdr.str_concat(r, ")")
           <- r
 
-  let obj_c = emit_expr(obj, cask_name)
+  let obj_c = emit_flat_arg(obj, emit_expr(obj, cask_name))
   let ?r = mangle_name(cask_name, field)
   r = stdr.str_concat(r, "(")
   r = stdr.str_concat(r, obj_c)
@@ -2990,9 +3031,9 @@ def ?g_flat_counter = 0
         g_last_line_num = sline
         let ?ld = "#line "
         ld = stdr.str_concat(ld, stdr.str(sline))
-        ld = stdr.str_concat(ld, " \"")
-        ld = stdr.str_concat(ld, g_emit_file_path)
-        ld = stdr.str_concat(ld, "\"\n")
+        ld = stdr.str_concat(ld, " ")
+        ld = stdr.str_concat(ld, _c_quote(g_emit_file_path))
+        ld = stdr.str_concat(ld, "\n")
         stdr.push(parts, ld)
     stdr.push(parts, emit_stmt(s, indent, cask_name))
   <- stdr.join(parts)
@@ -3012,19 +3053,33 @@ def ?g_flat_counter = 0
     if et == "array" { <- true }
     if et == "dict" { <- true }
     if et == "lambda" { <- true }
+    if et == "index" { <- true }
+    if et == "member" { <- true }
+    if et == "if_expr" { <- true }
+    if et == "match" { <- true }
+    if et == "binop" { <- true }
+    if et == "assign" { <- true }
+    if et == "ident"
+      let name = e["name"] ?? ""
+      if !stdr.is_null(g_scope_names[name]) { <- false }
+      let key = stdr.str_concat(stdr.str_concat(g_cur_mod, "."), name)
+      if !stdr.is_null(g_all_funs[key]) { <- true }
     <- false
 ;
 
 -- Register a fresh call-arg into the flat-temp accumulator.
 -- Returns a temp name (__ft0, __ft1, ...) for fresh args; otherwise returns arg_c as-is.
 : emit_flat_arg(arg_ast = any, arg_c = string) (( string ))
-    if !is_fresh_expr(arg_ast) { <- arg_c }
     let n = g_flat_counter
     g_flat_counter = g_flat_counter + 1
     let ?tname = "__ft"
     tname = stdr.str_concat(tname, stdr.str(n))
     stdr.push(g_flat_names, tname)
-    stdr.push(g_flat_exprs, arg_c)
+    let ?owned_c = arg_c
+    if !is_fresh_expr(arg_ast)
+      owned_c = stdr.str_concat("({ YisVal __borrowed = ", arg_c)
+      owned_c = stdr.str_concat(owned_c, "; yis_retain_val(__borrowed); __borrowed; })")
+    stdr.push(g_flat_exprs, owned_c)
     <- tname
 ;
 
@@ -3089,20 +3144,20 @@ def ?g_flat_counter = 0
       let init_type = type_of_expr(init, cask_name)
       if stdr.len(init_type) > 0
         g_var_types[name] = init_type
-    let ?r = indent
+    let id = g_tmp_counter
+    g_tmp_counter = g_tmp_counter + 1
+    let temp_name = stdr.str_concat("__local_init", stdr.str(id))
+    let ?r = stdr.str_concat(indent, "YisVal ")
+    r = stdr.str_concat(r, temp_name)
+    r = stdr.str_concat(r, " = ")
+    r = stdr.str_concat(r, emit_owned_expr(init, cask_name))
+    r = stdr.str_concat(r, ";\n")
+    r = stdr.str_concat(r, indent)
     r = stdr.str_concat(r, "YisVal v_")
     r = stdr.str_concat(r, name)
-    r = stdr.str_concat(r, " = ")
-    if stdr.is_null(init)
-      r = stdr.str_concat(r, "YV_NULLV")
-    else
-      r = stdr.str_concat(r, emit_expr(init, cask_name))
-    if stdr.is_null(init) || !is_fresh_expr(init)
-      r = stdr.str_concat(r, "; yis_retain_val(v_")
-      r = stdr.str_concat(r, name)
-      r = stdr.str_concat(r, ");\n")
-    else
-      r = stdr.str_concat(r, ";\n")
+    r = stdr.str_concat(r, " __attribute__((cleanup(yis_release_slot))) = ")
+    r = stdr.str_concat(r, temp_name)
+    r = stdr.str_concat(r, ";\n")
     scope_mark(name)
     g_owned_names[name] = true
     <- r
@@ -3112,20 +3167,20 @@ def ?g_flat_counter = 0
     let ik = "init"
     let name = s[nk] ?? ""
     let init = s[ik]
-    let ?r = indent
+    let id = g_tmp_counter
+    g_tmp_counter = g_tmp_counter + 1
+    let temp_name = stdr.str_concat("__local_init", stdr.str(id))
+    let ?r = stdr.str_concat(indent, "YisVal ")
+    r = stdr.str_concat(r, temp_name)
+    r = stdr.str_concat(r, " = ")
+    r = stdr.str_concat(r, emit_owned_expr(init, cask_name))
+    r = stdr.str_concat(r, ";\n")
+    r = stdr.str_concat(r, indent)
     r = stdr.str_concat(r, "YisVal v_")
     r = stdr.str_concat(r, name)
-    r = stdr.str_concat(r, " = ")
-    if stdr.is_null(init)
-      r = stdr.str_concat(r, "YV_NULLV")
-    else
-      r = stdr.str_concat(r, emit_expr(init, cask_name))
-    if stdr.is_null(init) || !is_fresh_expr(init)
-      r = stdr.str_concat(r, "; yis_retain_val(v_")
-      r = stdr.str_concat(r, name)
-      r = stdr.str_concat(r, ");\n")
-    else
-      r = stdr.str_concat(r, ";\n")
+    r = stdr.str_concat(r, " __attribute__((cleanup(yis_release_slot))) = ")
+    r = stdr.str_concat(r, temp_name)
+    r = stdr.str_concat(r, ";\n")
     scope_mark(name)
     g_owned_names[name] = true
     <- r
@@ -3133,17 +3188,7 @@ def ?g_flat_counter = 0
   if st == "return"
     let vk = "value"
     let val = s[vk]
-    -- Build release string for all owned locals
-    let ?rel = ""
-    let ?ri = 0
-    let rn = stdr.len(g_scope_order)
-    for (; ri < rn; ri = ri + 1)
-      let rname = g_scope_order[ri] ?? ""
-      if !stdr.is_null(g_owned_names[rname])
-        rel = stdr.str_concat(rel, indent)
-        rel = stdr.str_concat(rel, "yis_release_val(v_")
-        rel = stdr.str_concat(rel, rname)
-        rel = stdr.str_concat(rel, ");\n")
+    let rel = ""
     if stdr.is_null(val)
       let ?r = indent
       r = stdr.str_concat(r, rel)
@@ -3209,7 +3254,7 @@ def ?g_flat_counter = 0
     let ck = "cond"
     let tk = "then"
     let ek = "else"
-    let cond_c = emit_expr(s[ck], cask_name)
+    let cond_c = emit_condition(s[ck], cask_name)
     let then_stmts = s[tk] ?? []: [any]
     let else_stmts = s[ek]
     let inner = stdr.str_concat(indent, "  ")
@@ -3276,13 +3321,17 @@ def ?g_flat_counter = 0
     -- condition
     if !stdr.is_null(cond)
       r = stdr.str_concat(r, " yis_as_bool(")
-      r = stdr.str_concat(r, emit_expr(cond, cask_name))
+      r = stdr.str_concat(r, emit_condition(cond, cask_name))
       r = stdr.str_concat(r, ")")
     r = stdr.str_concat(r, ";")
     -- step (in for-clause so continue reaches it)
     if !stdr.is_null(step)
       r = stdr.str_concat(r, " (void)(")
-      r = stdr.str_concat(r, emit_expr(step, cask_name))
+      let ?step_c = emit_expr(step, cask_name)
+      if is_fresh_expr(step)
+        step_c = stdr.str_concat("({ YisVal __step = ", step_c)
+        step_c = stdr.str_concat(step_c, "; yis_release_val(__step); })")
+      r = stdr.str_concat(r, step_c)
       r = stdr.str_concat(r, ")")
     r = stdr.str_concat(r, ") {\n")
     -- body
@@ -3305,11 +3354,11 @@ def ?g_flat_counter = 0
     let itk = "iter"
     let bk = "body"
     let item = s[ik] ?? "it"
-    let iter_c = emit_expr(s[itk], cask_name)
+    let iter_c = emit_owned_expr(s[itk], cask_name)
     let body = s[bk] ?? []: [any]
     let inner = stdr.str_concat(indent, "  ")
     let ?r = indent
-    r = stdr.str_concat(r, "{ YisVal __iter = ")
+    r = stdr.str_concat(r, "{ YisVal __iter __attribute__((cleanup(yis_release_slot))) = ")
     r = stdr.str_concat(r, iter_c)
     r = stdr.str_concat(r, "; int64_t __len = stdr_len(__iter); for (int64_t __i = 0; __i ")
     r = stdr.str_concat(r, "\<")
@@ -3317,12 +3366,9 @@ def ?g_flat_counter = 0
     r = stdr.str_concat(r, inner)
     r = stdr.str_concat(r, "YisVal v_")
     r = stdr.str_concat(r, item)
-    r = stdr.str_concat(r, " = yis_index(__iter, YV_INT(__i));\n")
+    r = stdr.str_concat(r, " __attribute__((cleanup(yis_release_slot))) = yis_index(__iter, YV_INT(__i));\n")
+    scope_mark(item)
     r = stdr.str_concat(r, emit_stmts(body, inner, cask_name))
-    r = stdr.str_concat(r, inner)
-    r = stdr.str_concat(r, "yis_release_val(v_")
-    r = stdr.str_concat(r, item)
-    r = stdr.str_concat(r, ");\n")
     r = stdr.str_concat(r, indent)
     r = stdr.str_concat(r, "} }\n")
     g_scope_names = prev_scope_names_foreach
@@ -3344,7 +3390,7 @@ def ?g_flat_counter = 0
   let ck = "cond"
   let tk = "then"
   let ek = "else"
-  let cond_c = emit_expr(s[ck], cask_name)
+  let cond_c = emit_condition(s[ck], cask_name)
   let then_stmts = s[tk] ?? []: [any]
   let else_stmts = s[ek]
   let inner = stdr.str_concat(indent, "  ")
@@ -3384,6 +3430,18 @@ def ?g_flat_counter = 0
   <- r
 ;
 
+-- Parameter copies are owned locals so rebinding cannot release caller values.
+: emit_param_local(name = string, input = string) (( string ))
+  let ?r = "  YisVal v_"
+  r = stdr.str_concat(r, name)
+  r = stdr.str_concat(r, " __attribute__((cleanup(yis_release_slot))) = ")
+  r = stdr.str_concat(r, input)
+  r = stdr.str_concat(r, "; yis_retain_val(v_")
+  r = stdr.str_concat(r, name)
+  r = stdr.str_concat(r, ");\n")
+  <- r
+;
+
 : emit_lambda_wrapper(meta = any) (( string ))
   let lname = meta["name"] ?? "__lambda_0"
   let params = meta["params"] ?? []: [any]
@@ -3391,6 +3449,8 @@ def ?g_flat_counter = 0
   let caps = meta["captures"] ?? []: [any]
   let cap_types = meta["cap_types"] ?? []: [string => any]
   let cask_name = meta["cask"] ?? "init"
+  let prev_mod_owned = g_cur_mod
+  g_cur_mod = cask_name
   let capn = stdr.len(caps)
 
   let prev_scope = g_scope_names
@@ -3412,14 +3472,16 @@ def ?g_flat_counter = 0
     let cname = caps[i] ?? ""
     out = stdr.str_concat(out, "  YisVal v_")
     out = stdr.str_concat(out, cname)
-    out = stdr.str_concat(out, " = ")
+    out = stdr.str_concat(out, " __attribute__((cleanup(yis_release_slot))) = ")
     if capn > 0
       out = stdr.str_concat(out, "__caps[")
       out = stdr.str_concat(out, stdr.str(i))
       out = stdr.str_concat(out, "]")
     else
       out = stdr.str_concat(out, "YV_NULLV")
-    out = stdr.str_concat(out, ";\n")
+    out = stdr.str_concat(out, "; yis_retain_val(v_")
+    out = stdr.str_concat(out, cname)
+    out = stdr.str_concat(out, ");\n")
     scope_mark(cname)
     let cap_t = cap_types[cname]
     if !stdr.is_null(cap_t)
@@ -3432,11 +3494,13 @@ def ?g_flat_counter = 0
     let pname = p["name"] ?? ""
     out = stdr.str_concat(out, "  YisVal v_")
     out = stdr.str_concat(out, pname)
-    out = stdr.str_concat(out, " = argc > ")
+    out = stdr.str_concat(out, " __attribute__((cleanup(yis_release_slot))) = argc > ")
     out = stdr.str_concat(out, stdr.str(pi))
     out = stdr.str_concat(out, " ? argv[")
     out = stdr.str_concat(out, stdr.str(pi))
-    out = stdr.str_concat(out, "] : YV_NULLV;\n")
+    out = stdr.str_concat(out, "] : YV_NULLV; yis_retain_val(v_")
+    out = stdr.str_concat(out, pname)
+    out = stdr.str_concat(out, ");\n")
     scope_mark(pname)
     let ptype = p["type"] ?? ""
     if stdr.len(ptype) > 0
@@ -3444,14 +3508,14 @@ def ?g_flat_counter = 0
         g_var_types[pname] = ptype
 
   out = stdr.str_concat(out, emit_stmts(body, "  ", cask_name))
-  if !block_has_return(body)
-    out = stdr.str_concat(out, "  return YV_NULLV;\n")
+  out = stdr.str_concat(out, "  return YV_NULLV;\n")
   out = stdr.str_concat(out, "}\n\n")
 
   g_scope_names = prev_scope
   g_scope_order = prev_scope_order
   g_owned_names = prev_owned
   g_var_types = prev_var_types
+  g_cur_mod = prev_mod_owned
   <- out
 ;
 
@@ -3511,13 +3575,20 @@ def ?g_flat_counter = 0
     if k > 0 { out = stdr.str_concat(out, ", ") }
     let p = params[k]
     let nk = "name"
-    out = stdr.str_concat(out, "YisVal v_")
+    out = stdr.str_concat(out, "YisVal __arg_")
     out = stdr.str_concat(out, p[nk] ?? "")
   if np == 0 { out = stdr.str_concat(out, "void") }
   out = stdr.str_concat(out, ") {\n")
+  let ?local_i = 0
+  for (; local_i < np; local_i = local_i + 1)
+    let local_name = params[local_i]["name"] ?? ""
+    out = stdr.str_concat(out, emit_param_local(local_name, stdr.str_concat("__arg_", local_name)))
+
   if cask_name == "stdr" && name == "str" && stdr.len(body) == 0
     out = stdr.str_concat(out, "  return YV_STR(stdr_to_string(v_x));\n")
   out = stdr.str_concat(out, emit_stmts(body, "  ", cask_name))
+  if !is_void
+    out = stdr.str_concat(out, "  return YV_NULLV;\n")
   out = stdr.str_concat(out, "}\n\n")
 
   g_var_types = prev_var_types
@@ -3541,8 +3612,17 @@ def ?g_flat_counter = 0
   let ret = d[rk] ?? "any"
   let body = d[bk] ?? []: [any]
   let is_void = ret == "void" || ret == "--"
+  let prev_mod_owned = g_cur_mod
+  g_cur_mod = cask_name
 
   -- Set up type tracking for macros: this = <- type class if known
+  let prev_scope_names_m = g_scope_names
+  let prev_scope_order_m = g_scope_order
+  let prev_owned_m = g_owned_names
+  g_scope_names = []: [string => any]
+  g_scope_order = []: [any]
+  g_owned_names = []: [string => any]
+  scope_mark("this")
   let prev_var_types_m = g_var_types
   g_var_types = []: [string => any]
   if stdr.len(ret) > 0
@@ -3555,16 +3635,23 @@ def ?g_flat_counter = 0
   else
     out = stdr.str_concat(out, "static YisVal ")
   out = stdr.str_concat(out, mangle_name(cask_name, mname))
-  out = stdr.str_concat(out, "(YisVal v_this")
+  out = stdr.str_concat(out, "(YisVal __arg_this")
   let ?np = 0
   np = stdr.len(params)
   let ?k = 0
   for (; k < np; k = k + 1)
-    out = stdr.str_concat(out, ", YisVal v_")
+    out = stdr.str_concat(out, ", YisVal __arg_")
     let p = params[k]
     let nk = "name"
     out = stdr.str_concat(out, p[nk] ?? "")
   out = stdr.str_concat(out, ") {\n")
+  out = stdr.str_concat(out, emit_param_local("this", "__arg_this"))
+  let ?local_i = 0
+  for (; local_i < np; local_i = local_i + 1)
+    let local_name = params[local_i]["name"] ?? ""
+    scope_mark(local_name)
+    out = stdr.str_concat(out, emit_param_local(local_name, stdr.str_concat("__arg_", local_name)))
+
 
   -- For macro bodies, the last statement is typically an expression.
   -- Wrap it in a <-.
@@ -3579,16 +3666,23 @@ def ?g_flat_counter = 0
     let ltag = last[tag] ?? ""
     if ltag == "expr_stmt"
       let ek = "expr"
-      out = stdr.str_concat(out, "  return ")
-      out = stdr.str_concat(out, emit_expr(last[ek], cask_name))
-      out = stdr.str_concat(out, ";\n")
+      let ?return_stmt = []: [string => any]
+      return_stmt["tag"] = "return"
+      return_stmt["value"] = last[ek]
+      out = stdr.str_concat(out, emit_stmt(return_stmt, "  ", cask_name))
     else
       out = stdr.str_concat(out, emit_stmt(last, "  ", cask_name))
   else
     out = stdr.str_concat(out, emit_stmts(body, "  ", cask_name))
 
+  if !is_void
+    out = stdr.str_concat(out, "  return YV_NULLV;\n")
   out = stdr.str_concat(out, "}\n\n")
   g_var_types = prev_var_types_m
+  g_scope_names = prev_scope_names_m
+  g_scope_order = prev_scope_order_m
+  g_owned_names = prev_owned_m
+  g_cur_mod = prev_mod_owned
   <- out
 ;
 
@@ -3648,11 +3742,18 @@ def ?g_flat_counter = 0
     if k > 0 { out = stdr.str_concat(out, ", ") }
     let p = params[k]
     let nk2 = "name"
-    out = stdr.str_concat(out, "YisVal v_")
+    out = stdr.str_concat(out, "YisVal __arg_")
     out = stdr.str_concat(out, p[nk2] ?? "")
   if nparams == 0 { out = stdr.str_concat(out, "void") }
   out = stdr.str_concat(out, ") {\n")
+  let ?local_i = 0
+  for (; local_i < nparams; local_i = local_i + 1)
+    let local_name = params[local_i]["name"] ?? ""
+    out = stdr.str_concat(out, emit_param_local(local_name, stdr.str_concat("__arg_", local_name)))
+
   out = stdr.str_concat(out, emit_stmts(body, "  ", cask_name))
+  if !is_void
+    out = stdr.str_concat(out, "  return YV_NULLV;\n")
   out = stdr.str_concat(out, "}\n\n")
 
   -- Restore context
@@ -4032,6 +4133,9 @@ def ?g_flat_counter = 0
     let d = decls[i]
     if d[tag] == "def" { has_defs = true }
   if has_defs
+    stdr.push(g_def_init_modules, cask_name)
+    let prev_mod_defs = g_cur_mod
+    g_cur_mod = cask_name
     stdr.push(p, "static void __yis_")
     stdr.push(p, cask_name)
     stdr.push(p, "_init(void) {\n")
@@ -4044,12 +4148,24 @@ def ?g_flat_counter = 0
         let dname = d[name_key] ?? ""
         let dinit = d[init_key]
         if !stdr.is_null(dinit)
-          stdr.push(p, "  yis_move_into(&")
+          stdr.push(p, "  { YisVal __global_init = ")
+          stdr.push(p, emit_owned_expr(dinit, cask_name))
+          stdr.push(p, "; yis_move_into(&")
           stdr.push(p, mangle_def(cask_name, dname))
-          stdr.push(p, ", ")
-          stdr.push(p, emit_expr(dinit, cask_name))
-          stdr.push(p, ");\n")
+          stdr.push(p, ", __global_init); yis_release_val(__global_init); }\n")
     stdr.push(p, "}\n\n")
+    stdr.push(p, "static void __yis_")
+    stdr.push(p, cask_name)
+    stdr.push(p, "_cleanup(void) {\n")
+    i = n - 1
+    for (; i >= 0; i = i - 1)
+      let d = decls[i]
+      if d[tag] == "def"
+        stdr.push(p, "  yis_release_val(yis_move(&")
+        stdr.push(p, mangle_def(cask_name, d[name_key] ?? ""))
+        stdr.push(p, "));\n")
+    stdr.push(p, "}\n\n")
+    g_cur_mod = prev_mod_defs
 
   -- Emit any additional lambda wrappers created during def init emission
   let ?li2 = li
@@ -4228,20 +4344,9 @@ def ?g_flat_counter = 0
   stdr.remove_file(path)
 ;
 
-: rm_tree_quiet(path = string) (( -- ))
-  if stdr.len(path) == 0 { <- }
-  let cmd = stdr.str_concat("rm -rf -- ", shell_quote_arg(path))
-  stdr.run_command(cmd)
-;
-
 : env_nonempty(name = string) (( bool ))
   if stdr.len(name) == 0 { <- false }
-  let ?cmd = "printenv "
-  cmd = stdr.str_concat(cmd, name)
-  cmd = stdr.str_concat(cmd, " >/dev/null 2>&1 && echo y")
-  let res = stdr.run_command(cmd)
-  let code = res[0] ?? 1
-  <- code == 0
+  <- stdr.len(_env_value(name)) > 0
 ;
 
 -- Extract set_appid("...") from source text without parsing
@@ -4268,75 +4373,169 @@ def ?g_flat_counter = 0
   <- stdr.slice(rest, 0, close)
 ;
 
--- Compute the manifest path for a run-mode entry file
--- For ext-module apps with a .app bundle, put it inside the bundle.
-: run_manifest_path(entry_path = string, source_raw = string, ext_module = string) (( string ))
-  let ?app_name = sanitize_filename_component(stem_name(entry_path))
-  if stdr.len(app_name) == 0 { app_name = "main" }
-  if stdr.len(ext_module) > 0
-    let appid = extract_appid_from_source(source_raw)
-    if stdr.len(appid) > 0 { app_name = appid }
-    let plist = stdr.str_concat(app_name, ".app/Contents/Info.plist")
-    if stdr.file_exists(plist)
-      <- stdr.str_concat(app_name, ".app/Contents/.yis_manifest")
-  <- stdr.str_concat(".", stdr.str_concat(app_name, ".yis_manifest"))
-;
-
--- Write run manifest after successful compilation
-: write_run_manifest(manifest_path = string, out_path = string, entry_path = string, ext_module_yi = string, compiler_path = string) (( -- ))
-  let ?content = out_path
-  content = stdr.str_concat(content, "\n")
-  content = stdr.str_concat(content, entry_path)
-  content = stdr.str_concat(content, "\n")
-  if stdr.len(ext_module_yi) > 0
-    content = stdr.str_concat(content, ext_module_yi)
-    content = stdr.str_concat(content, "\n")
-  if stdr.len(compiler_path) > 0
-    content = stdr.str_concat(content, compiler_path)
-    content = stdr.str_concat(content, "\n")
-  stdr.write_text_file(manifest_path, content)
-;
-
--- Check if binary at out_path is newer than all dep lines in the manifest
-: check_manifest_freshness(manifest_path = string, entry_path = string) (( string ))
-  if !stdr.file_exists(manifest_path) { <- "" }
-  let raw = stdr.read_text_file(manifest_path)
-  if stdr.is_null(raw) { <- "" }
-  let n = stdr.len(raw)
-  if n == 0 { <- "" }
-
-  -- Parse lines: first line is out_path, rest are dependency paths
-  let ?lines = []: [string]
-  let ?line_start = 0
+-- Parse environment compiler arguments without evaluating shell expansions.
+-- Quoting and escaping group literal arguments; '$', backticks and ';' stay literal.
+: driver_words(text = string, setting = string) (( any ))
+  let ?words = []: [any]
+  let ?word = ""
+  let ?started = false
+  let ?quote = ""
   let ?i = 0
-  for (; i < n; i = i + 1)
-    if stdr.slice(raw, i, i + 1) == "\n"
-      if i > line_start
-        stdr.push(lines, stdr.slice(raw, line_start, i))
-      line_start = i + 1
-  if line_start < n
-    stdr.push(lines, stdr.slice(raw, line_start, n))
+  let n = stdr.len(text)
+  for (; i < n; i += 1)
+    let c = stdr.slice(text, i, i + 1)
+    if quote == "'"
+      if c == "'" { quote = "" }
+      else { word = stdr.str_concat(word, c) }
+      continue
+    if c == "\\"
+      if i + 1 >= n
+        stdr.write(stdr.str_concat("ERR: Trailing escape in ", stdr.str_concat(setting, "\n")))
+        stdr.exit_process(1)
+      let next = stdr.slice(text, i + 1, i + 2)
+      if quote == "\"" && next != "\"" && next != "\\" && next != "$" && next != "`"
+        word = stdr.str_concat(word, c)
+        continue
+      word = stdr.str_concat(word, next)
+      started = true
+      i += 1
+      continue
+    if quote == "\""
+      if c == "\"" { quote = "" }
+      else { word = stdr.str_concat(word, c) }
+      continue
+    if c == "'" || c == "\""
+      quote = c
+      started = true
+      continue
+    if c == " " || c == "\t" || c == "\n" || c == "\r"
+      if started
+        stdr.push(words, word)
+        word = ""
+        started = false
+      continue
+    word = stdr.str_concat(word, c)
+    started = true
+  if stdr.len(quote) > 0
+    stdr.write(stdr.str_concat("ERR: Unclosed quote in ", stdr.str_concat(setting, "\n")))
+    stdr.exit_process(1)
+  if started { stdr.push(words, word) }
+  <- words
+;
 
-  let line_count = stdr.len(lines)
-  if line_count < 2 { <- "" }
-  -- Output names can collide for sources in different directories.
-  let manifest_entry = lines[1] ?? ""
-  if manifest_entry != entry_path { <- "" }
+: driver_quote_words(words = any) (( string ))
+  let ?parts = []: [any]
+  let ?i = 0
+  for (; i < stdr.len(words); i += 1)
+    if i > 0 { stdr.push(parts, " ") }
+    stdr.push(parts, shell_quote_arg(words[i] ?? ""))
+  <- stdr.join(parts)
+;
 
-  let out_path = lines[0] ?? ""
-  if !stdr.file_exists(out_path) { <- "" }
-  let out_mt = stdr.file_mtime_ns(out_path)
-  if out_mt < 0 { <- "" }
+-- Flags that introduce native files need their own dependency discovery. Until
+-- that is available, compile them each time rather than reuse a stale binary.
+: driver_has_native_inputs(words = any) (( bool ))
+  let prefixes = ["-I", "-L", "-l", "-include", "-imacros", "-isystem", "-iquote", "-idirafter", "-isysroot", "--sysroot", "-B", "-specs", "-fplugin", "-Wl,", "-Wp,", "-X"]
+  let ?i = 0
+  for (; i < stdr.len(words); i += 1)
+    let word = words[i] ?? ""
+    if !stdr.starts_with(word, "-") { <- true }
+    let ?j = 0
+    for (; j < stdr.len(prefixes); j += 1)
+      if stdr.starts_with(word, prefixes[j] ?? "") { <- true }
+  <- false
+;
 
-  -- Check each dependency
-  let ?di = 1
-  for (; di < line_count; di = di + 1)
-    let dep = lines[di] ?? ""
-    if stdr.len(dep) == 0 { continue }
-    let dep_mt = stdr.file_mtime_ns(dep)
-    if dep_mt < 0 { <- "" }
-    if out_mt < dep_mt { <- "" }
-  <- out_path
+: driver_absolute_path(path = string) (( string ))
+  let canonical = stdr.realpath(path)
+  if !stdr.is_null(canonical) { <- canonical }
+  let ?absolute = path
+  if !stdr.starts_with(path, "/")
+    absolute = stdr.str_concat(stdr.str_concat(stdr.getcwd(), "/"), path)
+  -- Normalize lexical '.' and '..' components without changing symlink semantics.
+  -- Keep '..': resolving it lexically could change a path passing through a symlink.
+  let ?parts = []: [any]
+  let ?start = 0
+  let ?i = 0
+  let n = stdr.len(absolute)
+  for (; i <= n; i += 1)
+    if i == n || stdr.slice(absolute, i, i + 1) == "/"
+      let segment = stdr.slice(absolute, start, i)
+      if stdr.len(segment) > 0 && segment != "."
+        stdr.push(parts, "/")
+        stdr.push(parts, segment)
+      start = i + 1
+  if stdr.len(parts) == 0 { <- "/" }
+  <- stdr.join(parts)
+;
+
+: driver_resolve_executable(name = string) (( string ))
+  if stdr.len(dir_of(name)) > 0 { <- driver_absolute_path(name) }
+  let res = stdr.run_command(stdr.str_concat("command -v ", shell_quote_arg(name)))
+  let result_code = res[0] ?? 1
+  if result_code == 0
+    let found = _chomp_newline(res[1] ?? "")
+    if stdr.len(found) > 0 { <- driver_absolute_path(found) }
+  <- name
+;
+
+: driver_cache_field(parts = any, key = string, value = string) (( -- ))
+  stdr.push(parts, key)
+  stdr.push(parts, "=")
+  stdr.push(parts, stdr.str(stdr.len(value)))
+  stdr.push(parts, ":")
+  stdr.push(parts, value)
+  stdr.push(parts, "\n")
+;
+
+-- Track resolved dependency paths as well as contents: an older replacement import
+-- and an edit that preserves its timestamp must both invalidate the run cache.
+: driver_dependency_stamp(path = string, seen = any, parts = any) (( -- ))
+  let ?seen_map = seen
+  let canonical = driver_absolute_path(path)
+  if seen[canonical] { <- }
+  seen_map[canonical] = true
+  let ast = load_module(path)
+  driver_cache_field(parts, "source", canonical)
+  driver_cache_field(parts, "content", g_source_hashes[path] ?? "")
+  let decls = ast["decls"] ?? []: [any]
+  let ?i = 0
+  for (; i < stdr.len(decls); i += 1)
+    let d = decls[i]
+    let dtag = d["tag"] ?? ""
+    if dtag != "bring" { continue }
+    let dependency = resolve_bring(d["name"] ?? "", dir_of(path))
+    driver_dependency_stamp(dependency, seen, parts)
+;
+
+: driver_cache_directory() (( string ))
+  let configured = _env_value("YIS_CACHE_DIR")
+  if stdr.len(configured) > 0
+    let explicit = driver_absolute_path(configured)
+    if stdr.ensure_dir(explicit) { <- explicit }
+    stdr.write("ERR: Cannot create YIS_CACHE_DIR\n")
+    stdr.exit_process(1)
+  let ?base = _env_value("XDG_CACHE_HOME")
+  if stdr.len(base) == 0
+    let home = stdr.home_dir()
+    if stdr.len(home) > 0 { base = stdr.str_concat(home, "/.cache") }
+  if stdr.len(base) > 0
+    let candidate = driver_absolute_path(stdr.str_concat(base, "/yis"))
+    if stdr.ensure_dir(candidate) { <- candidate }
+  let local = driver_absolute_path(".yi-cache")
+  if stdr.ensure_dir(local) { <- local }
+  stdr.write("ERR: Cannot create binary cache directory\n")
+  stdr.exit_process(1)
+  <- ""
+;
+
+: driver_write_manifest(path = string, content = string) (( -- ))
+  let temp = stdr.temp_file(dir_of(path), ".yis-manifest-")
+  if stdr.is_null(temp) { <- }
+  if !stdr.write_text_file(temp, content)
+    rm_file_quiet(temp)
+    <-
+  if !stdr.move_file(temp, path) { rm_file_quiet(temp) }
 ;
 
 : should_decode_escapes(path = string) (( bool ))
@@ -4610,18 +4809,8 @@ def ?g_flat_counter = 0
   let resources_dir = stdr.str_concat(contents_dir, "/Resources")
   let plist_path = stdr.str_concat(contents_dir, "/Info.plist")
 
-  let ?mk = "mkdir -p \""
-  mk = stdr.str_concat(mk, bundle_root)
-  mk = stdr.str_concat(mk, "\" \"")
-  mk = stdr.str_concat(mk, contents_dir)
-  mk = stdr.str_concat(mk, "\" \"")
-  mk = stdr.str_concat(mk, macos_dir)
-  mk = stdr.str_concat(mk, "\" \"")
-  mk = stdr.str_concat(mk, resources_dir)
-  mk = stdr.str_concat(mk, "\"")
-  let mk_res = stdr.run_command(mk)
-  let mk_code = mk_res[0] ?? 1
-  if mk_code != 0 { <- false }
+  if !stdr.ensure_dir(macos_dir) { <- false }
+  if !stdr.ensure_dir(resources_dir) { <- false }
 
   let lt = "\<"
   let gt = "\>"
@@ -4883,49 +5072,6 @@ def ?g_flat_counter = 0
   <- ""
 ;
 
-: runtime_dep_fresh(out_path = string, argv = any) (( bool ))
-  let ?p = "src/runtime.inc"
-  if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-  p = "src/bootstrap/runtime.inc"
-  if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-
-  let ?exe0_in = argv[0] ?? ""
-  let ?exe_path = exe0_in
-  if stdr.len(exe0_in) > 0 && stdr.len(dir_of(exe0_in)) == 0
-    let which_cmd = stdr.str_concat("command -v ", shell_quote_arg(exe0_in))
-    let which_res = stdr.run_command(which_cmd)
-    let which_code = which_res[0] ?? 1
-    if which_code == 0
-      let ?wp = which_res[1] ?? ""
-      let wn = stdr.len(wp)
-      if wn > 0 && stdr.slice(wp, wn - 1, wn) == "\n"
-        wp = stdr.slice(wp, 0, wn - 1)
-      if stdr.len(wp) > 0 { exe_path = wp }
-
-  if stdr.len(exe_path) > 0
-    let exe_dir = dir_of(exe_path)
-    if stdr.len(exe_dir) > 0
-      p = stdr.str_concat(exe_dir, "../src/runtime.inc")
-      if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-      p = stdr.str_concat(exe_dir, "../src/bootstrap/runtime.inc")
-      if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-      p = stdr.str_concat(exe_dir, "../../src/runtime.inc")
-      if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-      p = stdr.str_concat(exe_dir, "../../src/bootstrap/runtime.inc")
-      if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-      p = stdr.str_concat(exe_dir, "../share/yis/runtime.inc")
-      if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-
-  p = "/opt/homebrew/share/yis/runtime.inc"
-  if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-  p = "/usr/local/share/yis/runtime.inc"
-  if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-  p = "/usr/share/yis/runtime.inc"
-  if file_exists(p) == 0 { <- output_newer_than(out_path, p) }
-
-  <- true
-;
-
 : _chomp_newline(text = string) (( string ))
   let n = stdr.len(text)
   if n > 0 && stdr.slice(text, n - 1, n) == "\n"
@@ -4936,16 +5082,7 @@ def ?g_flat_counter = 0
 : _env_value(name = string) (( string ))
   let cached = g_env_cache[name]
   if !stdr.is_null(cached) { <- cached ?? "" }
-  let ?cmd = "printenv "
-  cmd = stdr.str_concat(cmd, name)
-  cmd = stdr.str_concat(cmd, " 2>/dev/null")
-  let res = stdr.run_command(cmd)
-  let code = res[0] ?? 1
-  if code != 0
-    g_env_cache[name] = ""
-    <- ""
-  let out = res[1] ?? ""
-  let val = _chomp_newline(out)
+  let val = stdr.getenv(name) ?? ""
   g_env_cache[name] = val
   <- val
 ;
@@ -5039,6 +5176,7 @@ def ?g_flat_counter = 0
   if stdr.is_null(src)
     stdr.write(stdr.str_concat("ERR: Cannot read module: ", stdr.str_concat(fpath, "\n")))
     stdr.exit_process(1)
+  g_source_hashes[fpath] = stdr.hash_text(src)
   let toks = lexer.lex_with_escapes(src, should_decode_escapes(fpath))
   let ast = parser.parse(toks)
   if stdr.is_null(ast)
@@ -5048,46 +5186,10 @@ def ?g_flat_counter = 0
   <- ast
 ;
 
-: output_newer_than(out_path = string, dep_path = string) (( bool ))
-  let out_mt = stdr.file_mtime_ns(out_path)
-  let dep_mt = stdr.file_mtime_ns(dep_path)
-  if out_mt < 0 || dep_mt < 0 { <- false }
-  <- out_mt >= dep_mt
-;
-
-: output_fresh_for_module(out_path = string, fpath = string, seen = any) (( bool ))
-  let ?seen_map = seen
-  if stdr.len(fpath) == 0 { <- false }
-  if file_exists(fpath) != 0 { <- false }
-  if !output_newer_than(out_path, fpath) { <- false }
-
-  let was_seen = seen_map[fpath]
-  if !stdr.is_null(was_seen) { <- true }
-  seen_map[fpath] = true
-
-  let ast = load_module(fpath)
-  if stdr.is_null(ast) { <- false }
-
-  let decls = ast["decls"] ?? []: [any]
-  let src_dir = dir_of(fpath)
-  let ?i = 0
-  let n = stdr.len(decls)
-  for (; i < n; i = i + 1)
-    let d = decls[i]
-    let dtag = d["tag"] ?? ""
-    if dtag != "bring" { continue }
-    let bname = d["name"] ?? ""
-    let dep = resolve_bring(bname, src_dir)
-    if !output_fresh_for_module(out_path, dep, seen_map) { <- false }
-
-  <- true
-;
-
 -- ============================================================
--- Optimizer (Yis-level O3-ish pipeline)
--- Phase 1: constant fold/propagate + DCE
--- Phase 2: peephole simplification
--- Phase 3: small-function inlining + loop simplifications
+-- Optimizer: literal folding, immutable scalar propagation and dead code.
+-- Keep transformations conservative: values are dynamically typed, and an
+-- expression can perform calls or assignments even inside a literal container.
 -- ============================================================
 
 : lit_int(v = any) (( any ))
@@ -5107,13 +5209,13 @@ def ?g_flat_counter = 0
 : is_lit(e = any) (( bool ))
   if stdr.is_null(e) { <- false }
   let t = e["tag"] ?? ""
-  <- t == "int" || t == "bool" || t == "str" || t == "null"
+  <- t == "int" || t == "float" || t == "bool" || t == "str" || t == "null"
 ;
 
 : is_non_null_lit(e = any) (( bool ))
   if stdr.is_null(e) { <- false }
   let t = e["tag"] ?? ""
-  <- t == "int" || t == "bool" || t == "str" || t == "array" || t == "dict"
+  <- t == "int" || t == "float" || t == "bool" || t == "str" || t == "array" || t == "dict"
 ;
 
 : is_int_lit(e = any) (( bool ))
@@ -5150,12 +5252,16 @@ def ?g_flat_counter = 0
 ;
 
 : env_get(env = any, name = string) (( any ))
+  let writes = env["$writes"]
+  if !stdr.is_null(writes) && !stdr.is_null(writes[name]) { <- null }
   <- env[name]
 ;
 
 : env_set(env = any, name = string, value = any) (( any ))
   let ?out = env_clone(env)
-  out[name] = value
+  let writes = env["$writes"]
+  if !stdr.is_null(writes) && !stdr.is_null(writes[name]) { out[name] = null }
+  else { out[name] = value }
   <- out
 ;
 
@@ -5165,14 +5271,135 @@ def ?g_flat_counter = 0
   <- out
 ;
 
+-- A write anywhere in a function, including a loop or captured lambda, makes
+-- scalar propagation unsafe. Gather writes before optimizing its statements.
+-- The internal key cannot collide with a Yis identifier.
+: opt_collect_expr_writes(e = any, writes = any) (( -- ))
+  let ?write_map = writes
+  if stdr.is_null(e) { <- }
+  let t = e["tag"] ?? ""
+  if t == "assign"
+    let lhs = e["lhs"]
+    let lhs_tag = lhs["tag"] ?? ""
+    if lhs_tag == "ident" { write_map[lhs["name"] ?? ""] = true }
+    opt_collect_expr_writes(lhs, writes)
+    opt_collect_expr_writes(e["rhs"], writes)
+  elif t == "unary"
+    opt_collect_expr_writes(e["operand"], writes)
+  elif t == "binop"
+    opt_collect_expr_writes(e["left"], writes)
+    opt_collect_expr_writes(e["right"], writes)
+  elif t == "member" || t == "index"
+    opt_collect_expr_writes(e["obj"], writes)
+    opt_collect_expr_writes(e["idx"], writes)
+  elif t == "call" || t == "bang_call"
+    opt_collect_expr_writes(e["func"], writes)
+    opt_collect_expr_writes(e["recv"], writes)
+    let args = e["args"] ?? []: [any]
+    let ?i = 0
+    for (; i < stdr.len(args); i = i + 1) { opt_collect_expr_writes(args[i], writes) }
+  elif t == "array"
+    let xs = e["elems"] ?? []: [any]
+    let ?i = 0
+    for (; i < stdr.len(xs); i = i + 1) { opt_collect_expr_writes(xs[i], writes) }
+  elif t == "dict"
+    let xs = e["entries"] ?? []: [any]
+    let ?i = 0
+    for (; i < stdr.len(xs); i = i + 1)
+      opt_collect_expr_writes(xs[i]["key"], writes)
+      opt_collect_expr_writes(xs[i]["value"], writes)
+  elif t == "if_expr"
+    opt_collect_expr_writes(e["cond"], writes)
+    opt_collect_expr_writes(e["then"], writes)
+    opt_collect_expr_writes(e["else"], writes)
+  elif t == "lambda"
+    opt_collect_block_writes(e["body"] ?? []: [any], writes)
+  elif t == "match"
+    opt_collect_expr_writes(e["scrut"], writes)
+    let arms = e["arms"] ?? []: [any]
+    let ?i = 0
+    for (; i < stdr.len(arms); i = i + 1) { opt_collect_expr_writes(arms[i]["expr"], writes) }
+  elif t == "interp"
+    let parts = e["parts"] ?? []: [any]
+    let ?i = 0
+    for (; i < stdr.len(parts); i = i + 1)
+      let p = parts[i]
+      let part_kind = p["kind"] ?? ""
+      if part_kind == "expr"
+        opt_collect_expr_writes(interp_expr_to_ast(p["val"] ?? ""), writes)
+;
+
+: opt_collect_stmt_writes(s = any, writes = any) (( -- ))
+  if stdr.is_null(s) { <- }
+  let t = s["tag"] ?? ""
+  if t == "let" || t == "const" { opt_collect_expr_writes(s["init"], writes) }
+  elif t == "return" { opt_collect_expr_writes(s["value"], writes) }
+  elif t == "expr_stmt" { opt_collect_expr_writes(s["expr"], writes) }
+  elif t == "if"
+    opt_collect_expr_writes(s["cond"], writes)
+    opt_collect_block_writes(s["then"] ?? []: [any], writes)
+    opt_collect_block_writes(s["else"] ?? []: [any], writes)
+  elif t == "for"
+    opt_collect_stmt_writes(s["init_stmt"], writes)
+    opt_collect_expr_writes(s["init"], writes)
+    opt_collect_expr_writes(s["cond"], writes)
+    opt_collect_expr_writes(s["step"], writes)
+    opt_collect_block_writes(s["body"] ?? []: [any], writes)
+  elif t == "foreach"
+    opt_collect_expr_writes(s["iter"], writes)
+    opt_collect_block_writes(s["body"] ?? []: [any], writes)
+;
+
+: opt_collect_block_writes(stmts = any, writes = any) (( -- ))
+  let ?i = 0
+  for (; i < stdr.len(stmts); i = i + 1) { opt_collect_stmt_writes(stmts[i], writes) }
+;
+
+: opt_body_env(stmts = any) (( any ))
+  let ?env = env_new()
+  let ?writes = []: [string => any]
+  opt_collect_block_writes(stmts, writes)
+  env["$writes"] = writes
+  <- env
+;
+
+-- Folding must not overflow in the compiler process. Leave such operations
+-- to the runtime rather than evaluating undefined signed arithmetic here.
+: can_fold_int_op(op = string, a = num, b = num) (( bool ))
+  let hi = 9223372036854775807
+  let lo = 0 - hi - 1
+  if op == "plus"
+    if b > 0 { <- a <= hi - b }
+    <- a >= lo - b
+  if op == "minus"
+    if b > 0 { <- a >= lo + b }
+    <- a <= hi + b
+  if op == "star"
+    if a == 0 || b == 0 { <- true }
+    if a > 0
+      if b > 0 { <- a <= hi / b }
+      <- b >= lo / a
+    if b > 0 { <- a >= lo / b }
+    <- a >= hi / b
+  <- false
+;
+
 : expr_has_side_effect(e = any) (( bool ))
   if stdr.is_null(e) { <- false }
   let t = e["tag"] ?? ""
   if t == "call" || t == "bang_call" || t == "assign" { <- true }
-  if t == "unary" { <- expr_has_side_effect(e["operand"]) }
-  if t == "binop" { <- expr_has_side_effect(e["left"]) || expr_has_side_effect(e["right"]) }
-  if t == "member" { <- expr_has_side_effect(e["obj"]) }
-  if t == "index" { <- expr_has_side_effect(e["obj"]) || expr_has_side_effect(e["idx"]) }
+  -- Dynamic arithmetic and indexing can trap. Treat them as observable too.
+  if t == "unary"
+    let unary_op = e["op"] ?? ""
+    if unary_op == "bang" || unary_op == "hash"
+      <- expr_has_side_effect(e["operand"])
+    <- true
+  if t == "binop"
+    let op = e["op"] ?? ""
+    if op == "ampamp" || op == "barbar" || op == "qq" || op == "eqeq" || op == "ne"
+      <- expr_has_side_effect(e["left"]) || expr_has_side_effect(e["right"])
+    <- true
+  if t == "member" || t == "index" { <- true }
   if t == "array"
     let xs = e["elems"] ?? []: [any]
     let ?i = 0
@@ -5189,7 +5416,10 @@ def ?g_flat_counter = 0
     <- false
   if t == "if_expr"
     <- expr_has_side_effect(e["cond"]) || expr_has_side_effect(e["then"]) || expr_has_side_effect(e["else"])
-  <- false
+  if t == "int" || t == "float" || t == "bool" || t == "str" || t == "null" { <- false }
+  -- Interpolation contains parsed expressions; match arms may contain calls.
+  -- Retain unknown expression forms rather than silently deleting their work.
+  <- true
 ;
 
 : opt_expr(e = any, env = any) (( any ))
@@ -5205,15 +5435,17 @@ def ?g_flat_counter = 0
   if t == "unary"
     let op = e["op"] ?? ""
     let x = opt_expr(e["operand"], env)
-    if op == "minus" && is_int_lit(x) { <- lit_int(0 - int_lit_val(x)) }
+    if op == "minus" && is_int_lit(x)
+      let xv = int_lit_val(x)
+      if xv != 0 - 9223372036854775807 - 1 { <- lit_int(0 - xv) }
     if op == "bang" && is_bool_lit(x)
       if bool_lit_val(x) { <- lit_bool(false) }
       <- lit_bool(true)
     if op == "hash"
       let xt = x["tag"] ?? ""
-      if xt == "array" { <- lit_int(stdr.len(x["elems"] ?? []: [any])) }
+      if xt == "array" && !expr_has_side_effect(x) { <- lit_int(stdr.len(x["elems"] ?? []: [any])) }
       if xt == "str" { <- lit_int(stdr.len(x["value"] ?? "")) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "unary"
     n["op"] = op
     n["operand"] = x
@@ -5232,9 +5464,10 @@ def ?g_flat_counter = 0
     if is_int_lit(a) && is_int_lit(b)
       let av = int_lit_val(a)
       let bv = int_lit_val(b)
-      if op == "plus" { <- lit_int(av + bv) }
-      if op == "minus" { <- lit_int(av - bv) }
-      if op == "star" { <- lit_int(av * bv) }
+      if can_fold_int_op(op, av, bv)
+        if op == "plus" { <- lit_int(av + bv) }
+        if op == "minus" { <- lit_int(av - bv) }
+        if op == "star" { <- lit_int(av * bv) }
       if op == "eqeq" { <- lit_bool(av == bv) }
       if op == "ne" { <- lit_bool(av != bv) }
       if op == "lt" { <- lit_bool(av < bv) }
@@ -5250,24 +5483,15 @@ def ?g_flat_counter = 0
       if op == "eqeq" { <- lit_bool(av == bv) }
       if op == "ne" { <- lit_bool(av != bv) }
 
-    if op == "plus"
-      if is_int_lit(a) && int_lit_val(a) == 0 { <- b }
-      if is_int_lit(b) && int_lit_val(b) == 0 { <- a }
-    if op == "minus"
-      if is_int_lit(b) && int_lit_val(b) == 0 { <- a }
-    if op == "star"
-      if is_int_lit(a) && int_lit_val(a) == 1 { <- b }
-      if is_int_lit(b) && int_lit_val(b) == 1 { <- a }
-      if is_int_lit(a) && int_lit_val(a) == 0 { <- lit_int(0) }
-      if is_int_lit(b) && int_lit_val(b) == 0 { <- lit_int(0) }
+    -- Algebraic identities on unknown values can change dynamic types (for
+    -- example, string + 0 concatenates), coerce values, or discard side effects.
+    -- Fold only the two literal integer case above.
     if op == "ampamp"
-      if is_bool_lit(a) { if bool_lit_val(a) { <- b } else { <- lit_bool(false) } }
-      if is_bool_lit(b) { if bool_lit_val(b) { <- a } else { <- lit_bool(false) } }
+      if is_bool_lit(a) && !bool_lit_val(a) { <- lit_bool(false) }
     if op == "barbar"
-      if is_bool_lit(a) { if bool_lit_val(a) { <- lit_bool(true) } else { <- b } }
-      if is_bool_lit(b) { if bool_lit_val(b) { <- lit_bool(true) } else { <- a } }
+      if is_bool_lit(a) && bool_lit_val(a) { <- lit_bool(true) }
 
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "binop"
     n["op"] = op
     n["left"] = a
@@ -5303,42 +5527,41 @@ def ?g_flat_counter = 0
           let a0 = out_args[0]
           let a0t = dict_get_or(a0, "tag", "")
           if a0t == "null" { <- lit_bool(true) }
-          if is_non_null_lit(a0) { <- lit_bool(false) }
+          if is_non_null_lit(a0) && !expr_has_side_effect(a0) { <- lit_bool(false) }
         if field == "len" && stdr.len(out_args) == 1
           let a0 = out_args[0]
           let t0 = dict_get_or(a0, "tag", "")
-          if t0 == "array" { <- lit_int(stdr.len(dict_get_or(a0, "elems", []: [any]))) }
+          if t0 == "array" && !expr_has_side_effect(a0) { <- lit_int(stdr.len(dict_get_or(a0, "elems", []: [any]))) }
           if t0 == "str" { <- lit_int(stdr.len(dict_get_or(a0, "value", ""))) }
 
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "call"
     n["func"] = fn
     n["args"] = out_args
     <- n
 
   if t == "member"
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "member"
     n["obj"] = opt_expr(e["obj"], env)
     n["field"] = e["field"]
     <- n
 
   if t == "index"
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "index"
     n["obj"] = opt_expr(e["obj"], env)
     n["idx"] = opt_expr(e["idx"], env)
     <- n
 
   if t == "assign"
-    let lhs = opt_expr(e["lhs"], env)
+    -- An assignment target names storage, not its previously known value.
+    let orig_lhs = e["lhs"]
+    let ?lhs = orig_lhs
+    let orig_lhs_tag = orig_lhs["tag"] ?? ""
+    if orig_lhs_tag != "ident" { lhs = opt_expr(orig_lhs, env) }
     let rhs = opt_expr(e["rhs"], env)
-    let lhst = lhs["tag"] ?? ""
-    if lhst == "ident"
-      let nm = lhs["name"] ?? ""
-      if is_lit(rhs) { env_set(env, nm, rhs) }
-      else { env_kill(env, nm) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "assign"
     n["lhs"] = lhs
     n["rhs"] = rhs
@@ -5350,7 +5573,7 @@ def ?g_flat_counter = 0
     let ?i = 0
     let n = stdr.len(xs)
     for (; i < n; i = i + 1) { stdr.push(out, opt_expr(xs[i], env)) }
-    let ?r = []: [string => any]
+    let ?r = env_clone(e)
     r["tag"] = "array"
     r["elems"] = out
     <- r
@@ -5362,11 +5585,11 @@ def ?g_flat_counter = 0
     let n = stdr.len(xs)
     for (; i < n; i = i + 1)
       let it = xs[i]
-      let ?u = []: [string => any]
+      let ?u = env_clone(it)
       u["key"] = opt_expr(it["key"], env)
       u["value"] = opt_expr(it["value"], env)
       stdr.push(out, u)
-    let ?r = []: [string => any]
+    let ?r = env_clone(e)
     r["tag"] = "dict"
     r["entries"] = out
     <- r
@@ -5378,7 +5601,7 @@ def ?g_flat_counter = 0
     if is_bool_lit(c)
       if bool_lit_val(c) { <- tv }
       <- ev
-    let ?n = []: [string => any]
+    let ?n = env_clone(e)
     n["tag"] = "if_expr"
     n["cond"] = c
     n["then"] = tv
@@ -5386,13 +5609,6 @@ def ?g_flat_counter = 0
     <- n
 
   <- e
-;
-
-: splice_node(stmts = any) (( any ))
-  let ?n = []: [string => any]
-  n["tag"] = "__splice"
-  n["stmts"] = stmts
-  <- n
 ;
 
 : stmt_has_return(s = any) (( bool ))
@@ -5429,7 +5645,7 @@ def ?g_flat_counter = 0
     let ?next_env = env
     if !mut && is_lit(init) { next_env = env_set(env, name, init) }
     else { next_env = env_kill(env, name) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "let"
     n["name"] = name
     n["mutable"] = mut
@@ -5442,14 +5658,14 @@ def ?g_flat_counter = 0
     let ?next_env = env
     if is_lit(init) { next_env = env_set(env, name, init) }
     else { next_env = env_kill(env, name) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "const"
     n["name"] = name
     n["init"] = init
     <- pair(n, next_env)
 
   if st == "return"
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "return"
     n["value"] = opt_expr(s["value"], env)
     <- pair(n, env)
@@ -5457,7 +5673,7 @@ def ?g_flat_counter = 0
   if st == "expr_stmt"
     let ex = opt_expr(s["expr"], env)
     if !expr_has_side_effect(ex) { <- pair(null, env) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "expr_stmt"
     n["expr"] = ex
     <- pair(n, env)
@@ -5468,59 +5684,48 @@ def ?g_flat_counter = 0
     let else_env = env_clone(env)
     let then_b = opt_block(s["then"] ?? []: [any], then_env)
     let else_b = opt_block(s["else"] ?? []: [any], else_env)
-    if is_bool_lit(c)
-      if bool_lit_val(c) { <- pair(splice_node(then_b), env) }
-      <- pair(splice_node(else_b), env)
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "if"
     n["cond"] = c
     n["then"] = then_b
     n["else"] = else_b
+    -- Retain the block boundary when selecting a constant branch. Its locals
+    -- must not escape their scope or conflict with surrounding declarations.
+    if is_bool_lit(c)
+      if bool_lit_val(c) { n["else"] = []: [any] }
+      else { n["then"] = []: [any] }
     <- pair(n, env)
 
   if st == "for"
     let init_s = s["init_stmt"]
     let init_e = s["init"]
-    let cond = opt_expr(s["cond"], env)
-    let step = opt_expr(s["step"], env)
-    let body_env = env_clone(env)
-    let body = opt_block(s["body"] ?? []: [any], body_env)
-
-    -- Phase 3: loop simplifications
-    if is_bool_lit(cond) && !bool_lit_val(cond)
-      let ?pre = []: [any]
-      if !stdr.is_null(init_s)
-        let oi = opt_stmt(init_s, env)
-        let os = oi[0]
-        if !stdr.is_null(os) { stdr.push(pre, os) }
-      elif !stdr.is_null(init_e)
-        let ie = opt_expr(init_e, env)
-        if expr_has_side_effect(ie)
-          let ?es = []: [string => any]
-          es["tag"] = "expr_stmt"
-          es["expr"] = ie
-          stdr.push(pre, es)
-      <- pair(splice_node(pre), env)
-
-    let ?n = []: [string => any]
+    let ?loop_env = env_clone(env)
+    let ?opt_init_s = null
+    if !stdr.is_null(init_s)
+      let ip = opt_stmt(init_s, loop_env)
+      opt_init_s = ip[0]
+      -- Even an immutable loop variable must refer to the scoped declaration.
+      loop_env = env_kill(ip[1] ?? loop_env, init_s["name"] ?? "")
+    let cond = opt_expr(s["cond"], loop_env)
+    let step = opt_expr(s["step"], loop_env)
+    let body = opt_block(s["body"] ?? []: [any], loop_env)
+    let ?n = env_clone(s)
     n["tag"] = "for"
     n["init"] = if stdr.is_null(init_e) { null } else { opt_expr(init_e, env) }
     if is_bool_lit(cond) && bool_lit_val(cond) { n["cond"] = null } else { n["cond"] = cond }
     if !stdr.is_null(step) && !expr_has_side_effect(step) { n["step"] = null } else { n["step"] = step }
     n["body"] = body
-    if !stdr.is_null(init_s)
-      let ip = opt_stmt(init_s, env)
-      n["init_stmt"] = ip[0]
+    if !stdr.is_null(init_s) { n["init_stmt"] = opt_init_s }
     <- pair(n, env)
 
   if st == "foreach"
     let iter = opt_expr(s["iter"], env)
-    let body_env = env_clone(env)
+    let body_env = env_kill(env, s["item"] ?? "")
     let body = opt_block(s["body"] ?? []: [any], body_env)
     let itag = iter["tag"] ?? ""
     if itag == "array" && stdr.len(iter["elems"] ?? []: [any]) == 0 { <- pair(null, env) }
     if itag == "str" && stdr.len(iter["value"] ?? "") == 0 { <- pair(null, env) }
-    let ?n = []: [string => any]
+    let ?n = env_clone(s)
     n["tag"] = "foreach"
     n["item"] = s["item"]
     n["iter"] = iter
@@ -5542,16 +5747,6 @@ def ?g_flat_counter = 0
     cur_env = sp[1] ?? cur_env
     if stdr.is_null(os) { continue }
     let ot = os["tag"] ?? ""
-    if ot == "__splice"
-      let xs = os["stmts"] ?? []: [any]
-      let ?k = 0
-      let xn = stdr.len(xs)
-      for (; k < xn; k = k + 1)
-        let z = xs[k]
-        if !stdr.is_null(z) { stdr.push(out, z) }
-        let zt = z["tag"] ?? ""
-        if zt == "return" || zt == "break" || zt == "continue" { <- out }
-      continue
     stdr.push(out, os)
     if ot == "return" || ot == "break" || ot == "continue" { <- out }
   <- out
@@ -5561,59 +5756,57 @@ def ?g_flat_counter = 0
   if stdr.is_null(d) { <- d }
   let t = d["tag"] ?? ""
   if t == "fun" || t == "macro"
-    let ?n = d
-    let ?env = env_new()
+    let ?n = env_clone(d)
+    let ret = n["ret"] ?? "any"
+    if t == "macro" && ret != "void" && ret != "--"
+      let original = n["body"] ?? []: [any]
+      let ?normalized = []: [any]
+      let count = stdr.len(original)
+      for (let ?bi = 0; bi < count; bi += 1)
+        let stmt = original[bi]
+        let stmt_tag = stmt["tag"] ?? ""
+        if bi == count - 1 && stmt_tag == "expr_stmt"
+          let ?returned = env_clone(stmt)
+          returned["tag"] = "return"
+          returned["value"] = stmt["expr"]
+          stdr.push(normalized, returned)
+        else
+          stdr.push(normalized, stmt)
+      n["body"] = normalized
+    let ?env = opt_body_env(n["body"] ?? []: [any])
     let params = n["params"] ?? []: [any]
     let ?i = 0
     let pn = stdr.len(params)
     for (; i < pn; i = i + 1)
       let p = params[i]
       env = env_kill(env, p["name"] ?? "")
-    let orig_body = n["body"] ?? []: [any]
-    let opt_body = opt_block(orig_body, env)
-    let ret = n["ret"] ?? "any"
-    if ret != "void" && ret != "--"
-      if !block_has_return(opt_body)
-        n["body"] = orig_body
-      else
-        n["body"] = opt_body
-    else
-      n["body"] = opt_body
+    n["body"] = opt_block(n["body"] ?? []: [any], env)
     <- n
   if t == "exit"
-    let ?n = d
-    n["body"] = opt_block(n["body"] ?? []: [any], env_new())
+    let ?n = env_clone(d)
+    n["body"] = opt_block(n["body"] ?? []: [any], opt_body_env(n["body"] ?? []: [any]))
     <- n
   if t == "class"
-    let ?n = d
+    let ?n = env_clone(d)
     let methods = n["methods"] ?? []: [any]
     let ?out = []: [any]
     let ?i = 0
     let mn = stdr.len(methods)
     for (; i < mn; i = i + 1)
-      let ?m = methods[i]
-      let ?env = env_new()
+      let ?m = env_clone(methods[i])
+      let ?env = opt_body_env(m["body"] ?? []: [any])
       let params = m["params"] ?? []: [any]
       let ?pi = 0
       let pn = stdr.len(params)
       for (; pi < pn; pi = pi + 1)
         let p = params[pi]
         env = env_kill(env, p["name"] ?? "")
-      let m_orig_body = m["body"] ?? []: [any]
-      let m_opt_body = opt_block(m_orig_body, env)
-      let mret = m["ret"] ?? "any"
-      if mret != "void" && mret != "--"
-        if !block_has_return(m_opt_body)
-          m["body"] = m_orig_body
-        else
-          m["body"] = m_opt_body
-      else
-        m["body"] = m_opt_body
+      m["body"] = opt_block(m["body"] ?? []: [any], env)
       stdr.push(out, m)
     n["methods"] = out
     <- n
   if t == "def"
-    let ?n = d
+    let ?n = env_clone(d)
     n["init"] = opt_expr(n["init"], env_new())
     <- n
   <- d
@@ -5627,7 +5820,7 @@ def ?g_flat_counter = 0
   let n = stdr.len(decls)
   for (; i < n; i = i + 1)
     stdr.push(out, opt_decl(decls[i]))
-  let ?p = []: [string => any]
+  let ?p = env_clone(ast)
   p["tag"] = ast["tag"] ?? "program"
   p["decls"] = out
   <- p
@@ -5660,40 +5853,35 @@ def ?g_flat_counter = 0
   <- stdr.join(parts)
 ;
 
--- Collect all bring names from a decl list (non-builtin)
-: collect_brings(decls = any, src_dir = string) (( any ))
-  let tag = "tag"
-  let name_key = "name"
-  let decls_key = "decls"
-  let n = stdr.len(decls)
-  let ?result = []: [any]
-  let ?seen = []: [string => any]
+-- Visit imported modules before their dependents, including arbitrary depth.
+: collect_brings_visit(decls = any, src_dir = string, seen = any, result = any) (( -- ))
+  let ?seen_map = seen
   let ?i = 0
+  let n = stdr.len(decls)
   for (; i < n; i = i + 1)
     let d = decls[i]
-    if d[tag] == "bring"
-      let bname = d[name_key] ?? ""
-      if bname == "math" { continue }
-      if !stdr.is_null(seen[bname]) { continue }
-      seen[bname] = true
-      -- Also check transitive brings
-      let fpath = resolve_bring(bname, src_dir)
-      let mod_ast2 = load_module(fpath)
-      if !stdr.is_null(mod_ast2)
-        let mod_decls = mod_ast2[decls_key] ?? []: [any]
-        let mod_dir = dir_of(fpath)
-        -- Add transitive brings first (depth-first)
-        let ?j = 0
-        let mn = stdr.len(mod_decls)
-        for (; j < mn; j = j + 1)
-          let dd = mod_decls[j]
-          if dd[tag] == "bring"
-            let sub_name = dd[name_key] ?? ""
-            if sub_name == "math" || is_external_module(sub_name) { continue }
-            if !stdr.is_null(seen[sub_name]) { continue }
-            seen[sub_name] = true
-            stdr.push(result, [sub_name, mod_dir])
-      stdr.push(result, [bname, src_dir])
+    if d["tag"] != "bring" { continue }
+    let bname = d["name"] ?? ""
+    if bname == "math" { continue }
+    let fpath = resolve_bring(bname, src_dir)
+    let identity = driver_absolute_path(fpath)
+    let state = seen[identity] ?? 0
+    if state == 1
+      stdr.write(stdr.str_concat("ERR: Cyclic module import: ", stdr.str_concat(fpath, "\n")))
+      stdr.exit_process(1)
+    if state == 2 { continue }
+    seen_map[identity] = 1
+    let module = load_module(fpath)
+    if !stdr.is_null(module)
+      collect_brings_visit(module["decls"] ?? []: [any], dir_of(fpath), seen, result)
+    stdr.push(result, [bname, src_dir])
+    seen_map[identity] = 2
+;
+
+: collect_brings(decls = any, src_dir = string) (( any ))
+  let result = []: [any]
+  let seen = []: [string => any]
+  collect_brings_visit(decls, src_dir, seen, result)
   <- result
 ;
 
@@ -5844,6 +6032,7 @@ def ?g_flat_counter = 0
   if stdr.is_null(decls) { <- "int main(void) { return 0; }\n" }
 
   g_next_lambda_id = 1
+  g_def_init_modules = []: [any]
   g_src_dir = src_dir
   _reset_diag_demangle_context()
   _register_diag_file(entry_path)
@@ -5855,6 +6044,12 @@ def ?g_flat_counter = 0
   else
     stdr.push(p, "#include \"src/runtime.inc\"\n\n")
   stdr.push(p, "/* inlined runtime helpers */\n")
+  stdr.push(p, "static YisVal yis_dict_member_get(YisVal obj, YisVal key) {\n")
+  stdr.push(p, "  if (obj.tag != EVT_DICT) yis_trap(\"member access requires a dictionary or object\");\n")
+  stdr.push(p, "  return yis_dict_get((YisDict*)obj.as.p, key);\n}\n\n")
+  stdr.push(p, "static void yis_dict_member_set(YisVal obj, YisVal key, YisVal val) {\n")
+  stdr.push(p, "  if (obj.tag != EVT_DICT) yis_trap(\"member assignment requires a dictionary or object\");\n")
+  stdr.push(p, "  yis_dict_set((YisDict*)obj.as.p, key, val);\n}\n\n")
   stdr.push(p, "static YisVal yis_index(YisVal obj, YisVal idx) {\n")
   stdr.push(p, "  if (obj.tag == EVT_ARR) return yis_arr_get((YisArr*)obj.as.p, yis_as_int(idx));\n")
   stdr.push(p, "  if (obj.tag == EVT_DICT) return yis_dict_get((YisDict*)obj.as.p, idx);\n")
@@ -5958,26 +6153,8 @@ def ?g_flat_counter = 0
   stdr.push(p, emit_unit(ast))
   stdr.push(p, "/* end main unit */\n\n")
 
-  -- Collect def init calls from all modules (main + brought)
-  let ?init_calls = []: [any]
-  -- Check brought modules for defs
-  i = 0
-  for (; i < n; i = i + 1)
-    let d = decls[i]
-    if d[tag] == "bring"
-      let bname = d[name_key] ?? ""
-      if bname == "stdr" || bname == "math" { continue }
-      let fpath = resolve_bring(bname, src_dir)
-      let mod_ast4 = load_module(fpath)
-      if !stdr.is_null(mod_ast4)
-        let md = mod_ast4[decls_key] ?? []: [any]
-        let di = collect_def_inits(md)
-        if di["has_defs"]
-          stdr.push(init_calls, di["cask"] ?? bname)
-  -- Check main unit for defs
-  let main_di = collect_def_inits(decls)
-  if main_di["has_defs"]
-    stdr.push(init_calls, main_di["cask"] ?? "init")
+  -- Every emitted module is included, including transitive imports.
+  let init_calls = g_def_init_modules
 
   stdr.push(p, "int main(int argc, char **argv) {\n")
   stdr.push(p, "  yis_set_args(argc, argv);\n")
@@ -5987,6 +6164,9 @@ def ?g_flat_counter = 0
   let cn = stdr.len(init_calls)
   for (; ci < cn; ci = ci + 1)
     let cname = init_calls[ci] ?? ""
+    stdr.push(p, "  atexit(__yis_")
+    stdr.push(p, cname)
+    stdr.push(p, "_cleanup);\n")
     stdr.push(p, "  __yis_")
     stdr.push(p, cname)
     stdr.push(p, "_init();\n")
@@ -6043,6 +6223,7 @@ def ?g_flat_counter = 0
   if stdr.is_null(source_raw)
     stdr.write(stdr.str_concat("ERR: Cannot read file: ", stdr.str_concat(entry_path, "\n")))
     stdr.exit_process(1)
+  -- Preserve the supplied source directory for relative imports through symlinks.
   if !stdr.starts_with(entry_path, "/")
     entry_path = stdr.str_concat(stdr.str_concat(stdr.getcwd(), "/"), entry_path)
 
@@ -6059,23 +6240,25 @@ def ?g_flat_counter = 0
   if !is_self_host && !is_run_mode
     opt_ast = optimize_program(ast)
 
-  -- Detect external module usage by scanning AST for 'bring <ext_module>'
+  -- Discover native modules at every import depth so their flags and resources
+  -- are handled even when the entry imports only an ordinary wrapper module.
+  let src_dir = dir_of(entry_path)
+  let all_brings = collect_brings(opt_ast["decls"] ?? []: [any], src_dir)
   let ?ext_mod_name = ""
+  let ?ext_mod_dir = src_dir
   let ?ext_mod_names = []: [any]
   let ?uses_ext_module = false
   let decls_key2 = "decls"
-  let ast_decls2 = opt_ast[decls_key2] ?? []: [any]
   let ?di = 0
-  let dn = stdr.len(ast_decls2)
+  let dn = stdr.len(all_brings)
   for (; di < dn; di = di + 1)
-    let d2 = ast_decls2[di]
-    if d2["tag"] == "bring"
-      let bname2 = d2["name"] ?? ""
+      let bname2 = all_brings[di][0] ?? ""
       if is_external_module(bname2)
         if !array_has_string(ext_mod_names, bname2)
           stdr.push(ext_mod_names, bname2)
           if stdr.len(ext_mod_name) == 0
             ext_mod_name = bname2
+            ext_mod_dir = all_brings[di][1] ?? src_dir
           uses_ext_module = true
 
   let uname_res = stdr.run_command("uname")
@@ -6096,143 +6279,160 @@ def ?g_flat_counter = 0
       app_name = appid_name
     macos_display_name = extract_app_display_name(source_raw)
 
-  let ?c_path = stdr.str_concat(app_name, ".c")
-  if is_self_host
-    if is_run_mode
-      c_path = ".yi_run_compile_out.c"
-    else
-      c_path = ".yi_compile_out.c"
+  let ?ext_module_path = ""
+  let ?ext_packager_path = ""
+  if uses_ext_module
+    ext_module_path = resolve_bring(ext_mod_name, ext_mod_dir)
+    ext_packager_path = find_ext_module_packager(ext_mod_name, ext_module_path)
+
+  let ?cc_value = _env_value("CC")
+  if stdr.len(cc_value) == 0 { cc_value = "cc" }
+  let ?cc_words = []: [any]
+  -- A real executable path containing spaces is also a valid CC value.
+  if stdr.file_exists(cc_value)
+    stdr.push(cc_words, cc_value)
+  else
+    cc_words = driver_words(cc_value, "CC")
+  if stdr.len(cc_words) == 0 || stdr.len(cc_words[0] ?? "") == 0
+    stdr.write("ERR: CC must name a C compiler\n")
+    stdr.exit_process(1)
+  let cc_executable = driver_resolve_executable(cc_words[0] ?? "")
+  cc_words[0] = cc_executable
+  let cc_command = driver_quote_words(cc_words)
+  let extra_words = driver_words(_env_value("YIS_CC_FLAGS"), "YIS_CC_FLAGS")
+  let extra_flags = driver_quote_words(extra_words)
+  let ?cc_opt_flags = "-Os -std=c11 -pipe"
+  if is_run_mode { cc_opt_flags = "-O1 -std=c11 -pipe" }
+  let ?mod_cflags = ""
+  let ?mod_ldflags = ""
+  if uses_ext_module
+    let ?emi = 0
+    for (; emi < stdr.len(ext_mod_names); emi += 1)
+      let one_mod_name = ext_mod_names[emi] ?? ""
+      let upper_mod = str_to_upper(one_mod_name)
+      let cflags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_CFLAGS")
+      let flags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_FLAGS")
+      let ?one_cflags = _env_value(cflags_env)
+      let ?one_ldflags = _env_value(flags_env)
+      if stdr.len(one_cflags) == 0 { one_cflags = detect_module_cflags(one_mod_name) }
+      if stdr.len(one_ldflags) == 0 { one_ldflags = detect_module_ldflags(one_mod_name) }
+      mod_cflags = stdr.str_concat(mod_cflags, " ")
+      mod_cflags = stdr.str_concat(mod_cflags, driver_quote_words(driver_words(one_cflags, cflags_env)))
+      mod_ldflags = stdr.str_concat(mod_ldflags, " ")
+      mod_ldflags = stdr.str_concat(mod_ldflags, driver_quote_words(driver_words(one_ldflags, flags_env)))
 
   let ?out_path = app_name
+  let ?output_dir = "."
   if is_self_host
-    if is_run_mode
-      out_path = ".yi_run_out"
-    else
-      out_path = ".yi_out"
+    if is_run_mode { out_path = ".yi_run_out" }
+    else { out_path = ".yi_out" }
+
   let ?bundle_dir = ""
   let ?macos_bundle_id = ""
   if uses_ext_module && is_macos
     bundle_dir = stdr.str_concat(app_name, ".app")
-    out_path = stdr.str_concat(bundle_dir, "/Contents/MacOS/")
-    out_path = stdr.str_concat(out_path, app_name)
-    if stdr.contains(app_name, ".")
-      macos_bundle_id = app_name
-    else
-      macos_bundle_id = stdr.str_concat("org.yi.", app_name)
+    if is_run_mode { bundle_dir = stdr.str_concat(stdr.str_concat(output_dir, "/"), bundle_dir) }
+    out_path = stdr.str_concat(stdr.str_concat(bundle_dir, "/Contents/MacOS/"), app_name)
+    if stdr.contains(app_name, ".") { macos_bundle_id = app_name }
+    else { macos_bundle_id = stdr.str_concat("org.yi.", app_name) }
 
-  let src_dir = dir_of(entry_path)
-  let ?ext_module_path = ""
-  let ?ext_packager_path = ""
-  if uses_ext_module
-    ext_module_path = resolve_bring(ext_mod_name, src_dir)
-    ext_packager_path = find_ext_module_packager(ext_mod_name, ext_module_path)
-  let ?need_compile = true
-  let ?stale_out = false
+  -- Content fingerprints protect against backdated edits and changed import resolution.
+  -- Parsing imports remains necessary to discover their current transitive dependency graph.
+  let runtime_src = find_runtime_src(argv)
+  if stdr.len(runtime_src) == 0
+    stdr.write("ERR: Cannot find runtime.inc\n")
+    stdr.exit_process(1)
+  g_ast_cache[entry_path] = ast
+  g_source_hashes[entry_path] = stdr.hash_text(source_raw)
+  let ?stamp_parts = []: [any]
+  stdr.push(stamp_parts, "yis-run-cache-v3\n")
+  driver_cache_field(stamp_parts, "cwd", stdr.getcwd())
+  driver_cache_field(stamp_parts, "entry", entry_path)
+  let compiler_path = driver_resolve_executable(argv[0] ?? "")
+  let compiler_content = stdr.read_text_file(compiler_path)
+  let cc_content = stdr.read_text_file(cc_executable)
+  driver_cache_field(stamp_parts, "compiler", compiler_path)
+  driver_cache_field(stamp_parts, "compiler_content", stdr.hash_text(compiler_content ?? ""))
+  driver_cache_field(stamp_parts, "cc", cc_command)
+  driver_cache_field(stamp_parts, "cc_content", stdr.hash_text(cc_content ?? ""))
+  driver_cache_field(stamp_parts, "cc_defaults", cc_opt_flags)
+  driver_cache_field(stamp_parts, "cc_extra", extra_flags)
+  driver_cache_field(stamp_parts, "module_cflags", mod_cflags)
+  driver_cache_field(stamp_parts, "module_ldflags", mod_ldflags)
+  driver_cache_field(stamp_parts, "runtime", stdr.hash_text(runtime_src))
+  let ?seen_sources = []: [string => any]
+  driver_dependency_stamp(entry_path, seen_sources, stamp_parts)
+  let cache_stamp = stdr.join(stamp_parts)
+  if is_run_mode && !is_self_host
+    let cache_id = stdr.hash_text(cache_stamp)
+    output_dir = stdr.str_concat(stdr.str_concat(driver_cache_directory(), "/"), cache_id)
+    if !stdr.ensure_dir(output_dir)
+      stdr.write("ERR: Cannot create program cache directory\n")
+      stdr.exit_process(1)
+    out_path = stdr.str_concat(stdr.str_concat(output_dir, "/"), app_name)
+    if uses_ext_module && is_macos
+      bundle_dir = stdr.str_concat(stdr.str_concat(output_dir, "/"), stdr.str_concat(app_name, ".app"))
+      out_path = stdr.str_concat(stdr.str_concat(bundle_dir, "/Contents/MacOS/"), app_name)
+
+  let manifest_path = stdr.str_concat(out_path, ".yis_manifest")
   let no_cache = _env_value("YIS_NO_CACHE")
-  let cache_enabled = stdr.len(no_cache) == 0 || no_cache == "0"
-  if is_run_mode && cache_enabled
-    if file_exists(out_path) == 0
-      let manifest = run_manifest_path(entry_path, source_raw, ext_mod_name)
-      if check_manifest_freshness(manifest, entry_path) != out_path
-        stale_out = true
-      let ?seen = []: [string => any]
-      if output_fresh_for_module(out_path, entry_path, seen)
-        if runtime_dep_fresh(out_path, argv)
-          let ?compiler_path = argv[0] ?? ""
-          if stdr.len(compiler_path) > 0 && file_exists(compiler_path) == 0
-            if !output_newer_than(out_path, compiler_path)
-              stale_out = true
-          if stale_out
-            need_compile = true
-          else
-            need_compile = false
-        else
-          stale_out = true
-      else
-        stale_out = true
+  let keep_c = _env_value("YIS_KEEP_C") == "1"
+  -- Native headers, shared libraries and packaged resources are not yet tracked.
+  -- Rebuilding native-module apps is safer than reusing a possibly stale executable.
+  let native_search_env = ["CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "GCC_EXEC_PREFIX", "COMPILER_PATH"]
+  let ?untracked_native_inputs = driver_has_native_inputs(extra_words) || stdr.len(cc_words) > 1
+  let ?nsi = 0
+  for (; nsi < stdr.len(native_search_env); nsi += 1)
+    if stdr.len(_env_value(native_search_env[nsi] ?? "")) > 0 { untracked_native_inputs = true }
+  let cache_enabled = (stdr.len(no_cache) == 0 || no_cache == "0") && !uses_ext_module && !keep_c && !untracked_native_inputs && !stdr.is_null(compiler_content) && !stdr.is_null(cc_content)
+  let ?need_compile = true
+  if is_run_mode && cache_enabled && stdr.file_exists(out_path)
+    let previous_stamp = stdr.read_text_file(manifest_path)
+    if !stdr.is_null(previous_stamp) && previous_stamp == cache_stamp { need_compile = false }
 
-  if stale_out
-    rm_file_quiet(out_path)
-    if uses_ext_module && is_macos && stdr.len(bundle_dir) > 0
-      rm_tree_quiet(bundle_dir)
-
+  let ?c_path = ""
   if need_compile
-    -- Read runtime for embedding in generated C (only when compiling)
-    let runtime_src = find_runtime_src(argv)
-    if stdr.len(runtime_src) == 0
-      stdr.write("ERR: Cannot find runtime.inc\n")
-      stdr.exit_process(1)
-    let c_src_str = stdr.str(emit_c(opt_ast, runtime_src, src_dir, entry_path))
-    let ok = stdr.write_text_file(c_path, c_src_str)
-    if !ok
-      stdr.write("ERR: Cannot write C output\n")
-      stdr.exit_process(1)
-  if need_compile
-    -- Build cc command with external module flags if needed
-    -- Append stderr redirection so stdr.run_command captures compiler errors
-    let ?cc_opt_flags = "-Os -march=native -std=c11 -pipe"
-    if is_run_mode { cc_opt_flags = "-O0 -std=c11 -pipe" }
-    let ?cc_cmd = stdr.str_concat("cc -o ", shell_quote_arg(out_path))
-    cc_cmd = stdr.str_concat(cc_cmd, " ")
-    cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(c_path))
-    cc_cmd = stdr.str_concat(cc_cmd, " ")
-    cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
-    cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
-    if uses_ext_module
-      let ?mod_cflags = ""
-      let ?mod_ldflags = ""
-      let ?emi = 0
-      let emn = stdr.len(ext_mod_names)
-      for (; emi < emn; emi = emi + 1)
-        let one_mod_name = ext_mod_names[emi] ?? ""
-        let upper_mod = str_to_upper(one_mod_name)
-        let cflags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_CFLAGS")
-        let cflags_val = _env_value(cflags_env)
-        let ?one_cflags = ""
-        if stdr.len(cflags_val) > 0
-          one_cflags = cflags_val
-        else
-          one_cflags = detect_module_cflags(one_mod_name)
-        let flags_env = stdr.str_concat(stdr.str_concat("YIS_", upper_mod), "_FLAGS")
-        let flags_val = _env_value(flags_env)
-        let ?one_ldflags = ""
-        if stdr.len(flags_val) > 0
-          one_ldflags = flags_val
-        else
-          one_ldflags = detect_module_ldflags(one_mod_name)
-        if stdr.len(one_cflags) > 0
-          if stdr.len(mod_cflags) > 0
-            mod_cflags = stdr.str_concat(mod_cflags, " ")
-          mod_cflags = stdr.str_concat(mod_cflags, one_cflags)
-        if stdr.len(one_ldflags) > 0
-          if stdr.len(mod_ldflags) > 0
-            mod_ldflags = stdr.str_concat(mod_ldflags, " ")
-          mod_ldflags = stdr.str_concat(mod_ldflags, one_ldflags)
-      cc_cmd = stdr.str_concat("cc -o ", shell_quote_arg(out_path))
-      cc_cmd = stdr.str_concat(cc_cmd, " ")
-      cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(c_path))
-      cc_cmd = stdr.str_concat(cc_cmd, " ")
-      cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
-      cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
-      if stdr.len(mod_cflags) > 0
-        cc_cmd = stdr.str_concat(cc_cmd, mod_cflags)
-        cc_cmd = stdr.str_concat(cc_cmd, " ")
-      if stdr.len(mod_ldflags) > 0
-        cc_cmd = stdr.str_concat(cc_cmd, mod_ldflags)
-        cc_cmd = stdr.str_concat(cc_cmd, " ")
     if uses_ext_module && is_macos
       if !prepare_macos_app_bundle(out_path, macos_bundle_id, app_name, macos_display_name)
         stdr.write("ERR: failed to prepare macOS app bundle\n")
         stdr.exit_process(1)
+    let c_src_str = stdr.str(emit_c(opt_ast, runtime_src, src_dir, entry_path))
+    let c_temp = stdr.temp_file(output_dir, ".yis-c-")
+    if stdr.is_null(c_temp)
+      stdr.write("ERR: Cannot create temporary C output\n")
+      stdr.exit_process(1)
+    c_path = c_temp
+    if !stdr.write_text_file(c_path, c_src_str)
+      rm_file_quiet(c_path)
+      stdr.write("ERR: Cannot write C output\n")
+      stdr.exit_process(1)
 
-    -- Embed SVG resources as base64 into a header in .app/Contents/Resources
+    let ?compile_out_path = out_path
+    if is_run_mode && !is_self_host
+      let binary_temp = stdr.temp_file(dir_of(out_path), ".yis-bin-")
+      if stdr.is_null(binary_temp)
+        if !keep_c { rm_file_quiet(c_path) }
+        stdr.write("ERR: Cannot create temporary executable output\n")
+        stdr.exit_process(1)
+      compile_out_path = binary_temp
+    let ?cc_cmd = stdr.str_concat(cc_command, " -o ")
+    cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(compile_out_path))
+    cc_cmd = stdr.str_concat(cc_cmd, " -x c ")
+    cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(c_path))
+    cc_cmd = stdr.str_concat(cc_cmd, " -x none ")
+    cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
+    cc_cmd = stdr.str_concat(cc_cmd, " ")
+    cc_cmd = stdr.str_concat(cc_cmd, extra_flags)
+    cc_cmd = stdr.str_concat(cc_cmd, mod_cflags)
+    cc_cmd = stdr.str_concat(cc_cmd, mod_ldflags)
+    cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
+
     let ?embed_resource_dir = ""
     if uses_ext_module && stdr.len(ext_packager_path) > 0
       if stdr.len(bundle_dir) > 0
         embed_resource_dir = stdr.str_concat(bundle_dir, "/Contents/Resources")
       else
-        embed_resource_dir = dir_of(c_path)
-        if stdr.len(embed_resource_dir) == 0 { embed_resource_dir = "." }
+        embed_resource_dir = output_dir
       let ?embed_cmd = "sh "
       embed_cmd = stdr.str_concat(embed_cmd, shell_quote_arg(ext_packager_path))
       embed_cmd = stdr.str_concat(embed_cmd, " --embed-resources ")
@@ -6241,38 +6441,31 @@ def ?g_flat_counter = 0
       embed_cmd = stdr.str_concat(embed_cmd, shell_quote_arg(embed_resource_dir))
       embed_cmd = stdr.str_concat(embed_cmd, " 2>&1")
       stdr.run_command(embed_cmd)
-      -- Add -I so the compiler finds the embedded header in Resources
       cc_cmd = stdr.str_concat(cc_cmd, " -I")
       cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(embed_resource_dir))
-      cc_cmd = stdr.str_concat(cc_cmd, " ")
-
     cc_cmd = stdr.str_concat(cc_cmd, " 2>&1")
-
     let result = stdr.run_command(cc_cmd)
     let code = result[0] ?? 1
     let out = result[1] ?? ""
+    if !keep_c { rm_file_quiet(c_path) }
     if code != 0
       _translate_cc_output(out ?? "")
-      rm_file_quiet(out_path)
+      if keep_c { stdr.write(stdr.str_concat("Generated C: ", stdr.str_concat(c_path, "\n"))) }
+      rm_file_quiet(compile_out_path)
       stdr.exit_process(1)
-
+    if compile_out_path != out_path
+      if !stdr.move_file(compile_out_path, out_path)
+        rm_file_quiet(compile_out_path)
+        stdr.write("ERR: Cannot publish executable output\n")
+        stdr.exit_process(1)
     if uses_ext_module && stdr.len(ext_packager_path) > 0
       if !run_ext_module_packager(ext_packager_path, entry_path, out_path, app_name)
         stdr.write("WARN: external module packager failed\n")
-
-    -- Record the entry identity for cache checks on the next run.
-    if is_run_mode
-      let manifest = run_manifest_path(entry_path, source_raw, ext_mod_name)
-      let ?ext_yi_path = ""
-      if stdr.len(ext_mod_name) > 0
-        ext_yi_path = resolve_bring(ext_mod_name, src_dir)
-      let ?compiler_p = argv[0] ?? ""
-      write_run_manifest(manifest, out_path, entry_path, ext_yi_path, compiler_p)
+    if is_run_mode && cache_enabled
+      driver_write_manifest(manifest_path, cache_stamp)
 
   if is_run_mode
-    let cwd = stdr.getcwd()
-
-    let executable_path = stdr.str_concat(stdr.str_concat(cwd, "/"), out_path)
+    let executable_path = driver_absolute_path(out_path)
     let ?run_cmd = shell_quote_arg(executable_path)
 
     let ?ri = run_arg_start
@@ -6294,7 +6487,5 @@ def ?g_flat_counter = 0
     let run_out = run_res[1] ?? ""
     if stdr.len(run_out) > 0
       stdr.write(run_out ?? "")
-    if uses_ext_module
-      rm_file_quiet(c_path)
     stdr.exit_process(run_code)
 ;

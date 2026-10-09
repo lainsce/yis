@@ -19,10 +19,10 @@ class CompilerTests(unittest.TestCase):
         self.work = Path(self.temp.name)
         self.env = os.environ.copy()
         self.env["YIS_STDLIB"] = str(ROOT / "src/stdlib")
+        self.env["YIS_CACHE_DIR"] = str(self.work / "cache")
         # These tests must exercise the implementation, without onboarding workarounds.
         self.env.pop("YIS_CC_FLAGS", None)
         self.env.pop("YIS_DISABLE_BOOTSTRAP_FALLBACK", None)
-        self.env.pop("CC", None)
         self.env["PATH"] = os.pathsep.join(
             p for p in self.env["PATH"].split(os.pathsep)
             if not p.endswith(".yis-tools/compat")
@@ -39,6 +39,11 @@ class CompilerTests(unittest.TestCase):
             [str(COMPILER), *map(str, args)], cwd=self.work, env=self.env,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20,
         )
+
+    def cached_binary(self):
+        binaries = list((self.work / "cache").rglob("program"))
+        self.assertTrue(binaries, "successful run should produce a cached executable")
+        return max(binaries, key=lambda path: path.stat().st_mtime_ns)
 
     def assert_success(self, result, output=None):
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -90,7 +95,7 @@ class CompilerTests(unittest.TestCase):
         for _ in range(2):
             self.assert_success(self.invoke("run", path, "--", *args), output)
             self.assertFalse((self.work / "unexpected").exists())
-            stamp = (self.work / "program").stat().st_mtime_ns
+            stamp = self.cached_binary().stat().st_mtime_ns
             if compiled_at is not None:
                 self.assertEqual(stamp, compiled_at, "unchanged program should use the cache")
             compiled_at = stamp
@@ -104,7 +109,7 @@ class CompilerTests(unittest.TestCase):
     def test_no_cache_rebuilds_even_when_inputs_are_unchanged(self):
         path = self.source((ROOT / "examples/hello.yi").read_text())
         self.assert_success(self.invoke("run", path), "Hello, Yis World!\n")
-        binary = self.work / "program"
+        binary = self.cached_binary()
         compiled_at = binary.stat().st_mtime_ns
         self.env["YIS_NO_CACHE"] = "1"
         self.assert_success(self.invoke("run", path), "Hello, Yis World!\n")
@@ -130,6 +135,7 @@ class CompilerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse((self.work / "program").exists())
         self.assertFalse((self.work / ".program.yis_manifest").exists())
+        self.assertEqual(list((self.work / "cache").rglob("program")), [])
 
     def test_cache_invalidates_changed_transitive_import(self):
         leaf = self.source('cask leaf\n:: value() (( string ))\n  <- "first"\n;\n', "leaf.yi")
@@ -140,7 +146,7 @@ class CompilerTests(unittest.TestCase):
         self.assert_success(self.invoke("run", path), "first\n")
         leaf.write_text(leaf.read_text().replace("first", "second"))
         # Set a later nanosecond timestamp without a test sleep.
-        stamp = (self.work / "program").stat().st_mtime_ns + 1
+        stamp = self.cached_binary().stat().st_mtime_ns + 1
         os.utime(leaf, ns=(stamp, stamp))
         self.assert_success(self.invoke("run", path), "second\n")
 

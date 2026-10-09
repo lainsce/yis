@@ -3,8 +3,6 @@ project('yis', 'c',
   default_options : ['warning_level=2', 'c_std=c11', 'cpp_std=c++17']
 )
 
-add_project_arguments('-march=native', language : 'c')
-
 if host_machine.system() != 'windows'
   # The bootstrap uses POSIX APIs that strict C11 hides by default.
   add_project_arguments('-D_POSIX_C_SOURCE=200809L', '-D_XOPEN_SOURCE=700', language : 'c')
@@ -61,12 +59,29 @@ yis_target = custom_target(
 
 test_python = find_program('python3', required : false)
 if test_python.found()
-  test(
-    'compiler-regressions',
-    test_python,
-    args : [files('tests/test_compiler.py'), yis_target, meson.project_source_root()],
+  test('bootstrap-regressions', test_python,
+    args : [files('tests/test_bootstrap.py'), yis_bootstrap, meson.project_source_root()],
     timeout : 120
   )
+  foreach suite : [
+    ['compiler-regressions', 'tests/test_compiler.py'],
+    ['driver-configuration', 'tests/test_driver_config.py'],
+    ['optimizer-regressions', 'tests/test_optimizer.py'],
+    ['codegen-ownership', 'tests/test_codegen_memory.py'],
+    ['parser-regressions', 'tests/test_parser.py'],
+    ['string-regressions', 'tests/test_strings.py'],
+  ]
+    test(suite[0], test_python,
+      args : [files(suite[1]), yis_target, meson.project_source_root()],
+      timeout : 180
+    )
+  endforeach
+  test('native-runtime', test_python, args : files('tests/test_runtime.py'), timeout : 120)
+  if host_machine.system() == 'linux'
+    test('native-runtime-sanitizers', test_python,
+      args : [files('tests/test_runtime.py'), '--sanitizers'], timeout : 120
+    )
+  endif
 endif
 
 install_data(

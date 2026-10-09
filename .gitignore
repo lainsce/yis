@@ -12,6 +12,7 @@ build/
 _build/
 .yi-cache/
 .cache/
+__pycache__/
 .DS_Store
 
 # Outputs of yis compilation
