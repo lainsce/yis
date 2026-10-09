@@ -217,11 +217,26 @@ cask stdr
   <- __prune_files_older_than(dir, days)
 ;
 
+-- Exit the process with a status code, flushing buffered output
+: __exit_process(code = num) (( -- )) ;
+
+: exit_process(code = num) (( -- ))
+  __exit_process(code)
+;
+
 -- Run a shell command; returns (exit_code, stdout) as (num, string)
 : __run_command(cmd = string) (( num, string )) ;
 
 : run_command(cmd = string) (( num, string ))
   <- __run_command(cmd)
+;
+
+-- File modification time in nanoseconds since epoch (-1 if not found).
+-- Precision follows the platform filesystem; Windows stat has second resolution.
+: __file_mtime_ns(path = string) (( num )) ;
+
+: file_mtime_ns(path = string) (( num ))
+  <- __file_mtime_ns(path)
 ;
 
 : home_dir() (( string ))

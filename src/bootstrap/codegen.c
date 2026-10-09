@@ -2740,6 +2740,19 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         out->tmp = t;
                         return true;
                     }
+                    if (str_eq_c(fname, "__exit_process")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__exit_process expects 1 arg");
+                        GenExpr codev;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &codev, err)) return false;
+                        w_line(&cg->w, "stdr_exit_process(%s);", codev.tmp);
+                        gen_expr_release_except(cg, &codev, codev.tmp);
+                        gen_expr_free(&codev);
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = YV_NULLV;", t);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
                     if (str_eq_c(fname, "__run_command")) {
                         if (e->as.call.args_len != 1) return cg_set_err(err, path, "__run_command expects 1 arg");
                         GenExpr cmdv;
@@ -2772,6 +2785,19 @@ static bool gen_expr(Codegen *cg, Str path, Expr *e, GenExpr *out, Diag *err) {
                         if (!gen_expr(cg, path, e->as.call.args[0], &pathv, err)) return false;
                         char *t = codegen_new_tmp(cg);
                         w_line(&cg->w, "YisVal %s = stdr_file_mtime(%s);", t, pathv.tmp);
+                        w_line(&cg->w, "yis_release_val(%s);", pathv.tmp);
+                        gen_expr_release_except(cg, &pathv, pathv.tmp);
+                        gen_expr_free(&pathv);
+                        gen_expr_add(out, t);
+                        out->tmp = t;
+                        return true;
+                    }
+                    if (str_eq_c(fname, "__file_mtime_ns")) {
+                        if (e->as.call.args_len != 1) return cg_set_err(err, path, "__file_mtime_ns expects 1 arg");
+                        GenExpr pathv;
+                        if (!gen_expr(cg, path, e->as.call.args[0], &pathv, err)) return false;
+                        char *t = codegen_new_tmp(cg);
+                        w_line(&cg->w, "YisVal %s = stdr_file_mtime_ns(%s);", t, pathv.tmp);
                         w_line(&cg->w, "yis_release_val(%s);", pathv.tmp);
                         gen_expr_release_except(cg, &pathv, pathv.tmp);
                         gen_expr_free(&pathv);

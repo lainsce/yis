@@ -4,8 +4,8 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 YIS_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
-RUNTIME_SRC="${1:-$YIS_DIR/src/runtime.inc}"
-OUT_FILE="${2:-$YIS_DIR/src/runtime_embedded.h}"
+RUNTIME_SRC="${1:-$YIS_DIR/runtime.inc}"
+OUT_FILE="${2:-$YIS_DIR/runtime_embedded.h}"
 TMP_FILE="${TMPDIR:-/tmp}/yis_runtime_expanded.$$"
 
 cleanup() {
@@ -51,9 +51,9 @@ BEGIN {
   echo "#ifndef YIS_RUNTIME_EMBEDDED_H"
   echo "#define YIS_RUNTIME_EMBEDDED_H"
   echo ""
-  echo "// Auto-generated snapshot of yis/src/runtime.inc with // @include expansion."
+  echo "// Auto-generated snapshot of src/bootstrap/runtime.inc with // @include expansion."
   echo "// Used as a fallback when runtime.inc is not available next to the yis binary."
-  echo "// Regenerate with: yis/tools/gen_runtime_embedded.sh"
+  echo "// Regenerate with: src/bootstrap/tools/gen_runtime_embedded.sh"
   echo ""
   echo "static const char yis_runtime_embedded[] ="
   awk '

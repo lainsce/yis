@@ -33,6 +33,12 @@ Run the compiler from the build tree:
 ./build/yis run examples/hello.yi
 ```
 
+Run the compiler regression tests (requires Python 3):
+
+```sh
+meson test -C build --print-errorlogs
+```
+
 ## Optional Install
 
 Install Yis and stdlib:

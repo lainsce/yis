@@ -1839,6 +1839,19 @@ def ?brace_depth = 0
 ;
 
 :: parse(toks = any) (( any ))
+  -- Lexical errors invalidate the whole source, including otherwise valid declarations.
+  let n = stdr.len(toks)
+  for (let ?i = 0; i < n; i = i + 1)
+    let t = toks[i]
+    if t["kind"] == "error"
+      write("error: line ")
+      write(stdr.str(t["line"] ?? 0))
+      write(", column ")
+      write(stdr.str(t["col"] ?? 0))
+      write(": ")
+      write(t["text"] ?? "lexical error")
+      write("\n")
+      <- null
   let res = parse_program_at(toks, 0, []: [any])
   let _next = res[0]
   let prog = res[1]

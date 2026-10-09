@@ -1,4 +1,11 @@
 // ---- Yis runtime (minimal) ----
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +30,7 @@
 #endif
 #if !defined(_WIN32)
 #include <dirent.h>
+#include <sys/wait.h>
 #endif
 #include <unistd.h>
 
@@ -615,6 +623,10 @@ static YisVal stdr_prune_files_older_than(YisVal dirv, YisVal daysv) {
   return YV_INT(removed);
 }
 
+static void stdr_exit_process(YisVal codev) {
+  exit((int)stdr_num(codev));
+}
+
 static YisVal stdr_run_command(YisVal cmdv) {
   if (cmdv.tag != EVT_STR) yis_trap("run_command expects string");
   YisStr* cmd = (YisStr*)cmdv.as.p;
@@ -663,6 +675,11 @@ static YisVal stdr_run_command(YisVal cmdv) {
   int status = _pclose(p);
 #else
   int status = pclose(p);
+  if (status != -1) {
+    if (WIFEXITED(status)) status = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) status = 128 + WTERMSIG(status);
+    else status = -1;
+  }
 #endif
   YisStr* out_str = stdr_str_from_slice(buf, len);
   free(buf);
@@ -691,6 +708,20 @@ static YisVal stdr_file_mtime(YisVal pathv) {
   return YV_INT((int64_t)st.st_mtime);
 #else
   return YV_INT((int64_t)st.st_mtim.tv_sec);
+#endif
+}
+
+static YisVal stdr_file_mtime_ns(YisVal pathv) {
+  if (pathv.tag != EVT_STR) yis_trap("file_mtime_ns expects string");
+  YisStr* s = (YisStr*)pathv.as.p;
+  struct stat st;
+  if (stat(s->data, &st) != 0) return YV_INT(-1);
+#if defined(__APPLE__)
+  return YV_INT((int64_t)st.st_mtimespec.tv_sec * INT64_C(1000000000) + st.st_mtimespec.tv_nsec);
+#elif defined(_WIN32)
+  return YV_INT((int64_t)st.st_mtime * INT64_C(1000000000));
+#else
+  return YV_INT((int64_t)st.st_mtim.tv_sec * INT64_C(1000000000) + st.st_mtim.tv_nsec);
 #endif
 }
 
@@ -1385,10 +1416,25 @@ static YisVal yis_ne(YisVal a, YisVal b) {
   return YV_BOOL(!v.as.b);
 }
 
-static YisVal yis_lt(YisVal a, YisVal b) { return YV_BOOL(yis_as_float(a) < yis_as_float(b)); }
-static YisVal yis_le(YisVal a, YisVal b) { return YV_BOOL(yis_as_float(a) <= yis_as_float(b)); }
-static YisVal yis_gt(YisVal a, YisVal b) { return YV_BOOL(yis_as_float(a) > yis_as_float(b)); }
-static YisVal yis_ge(YisVal a, YisVal b) { return YV_BOOL(yis_as_float(a) >= yis_as_float(b)); }
+static YisVal yis_lt(YisVal a, YisVal b) {
+  if (a.tag == EVT_INT && b.tag == EVT_INT) return YV_BOOL(a.as.i < b.as.i);
+  return YV_BOOL(yis_as_float(a) < yis_as_float(b));
+}
+
+static YisVal yis_le(YisVal a, YisVal b) {
+  if (a.tag == EVT_INT && b.tag == EVT_INT) return YV_BOOL(a.as.i <= b.as.i);
+  return YV_BOOL(yis_as_float(a) <= yis_as_float(b));
+}
+
+static YisVal yis_gt(YisVal a, YisVal b) {
+  if (a.tag == EVT_INT && b.tag == EVT_INT) return YV_BOOL(a.as.i > b.as.i);
+  return YV_BOOL(yis_as_float(a) > yis_as_float(b));
+}
+
+static YisVal yis_ge(YisVal a, YisVal b) {
+  if (a.tag == EVT_INT && b.tag == EVT_INT) return YV_BOOL(a.as.i >= b.as.i);
+  return YV_BOOL(yis_as_float(a) >= yis_as_float(b));
+}
 
 static YisArr* stdr_arr_new(int n) {
   YisArr* a = (YisArr*)malloc(sizeof(YisArr));

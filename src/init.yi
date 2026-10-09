@@ -2253,6 +2253,11 @@ def ?g_flat_counter = 0
         r = emit_args(args, r, cask_name)
         r = stdr.str_concat(r, ")")
         <- r
+      if fname == "__exit_process"
+        let ?r = "stdr_exit_process("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        <- r
       if fname == "__file_exists"
         let ?r = "stdr_file_exists("
         r = emit_args(args, r, cask_name)
@@ -2260,6 +2265,11 @@ def ?g_flat_counter = 0
         <- r
       if fname == "__file_mtime"
         let ?r = "stdr_file_mtime("
+        r = emit_args(args, r, cask_name)
+        r = stdr.str_concat(r, ")")
+        <- r
+      if fname == "__file_mtime_ns"
+        let ?r = "stdr_file_mtime_ns("
         r = emit_args(args, r, cask_name)
         r = stdr.str_concat(r, ")")
         <- r
@@ -4119,13 +4129,28 @@ def ?g_flat_counter = 0
   let ?chunk_start = 0
   let ?i = 0
   let ?in_str = false
+  let ?block_depth = 0
   for (; i < n; i = i + 1)
     let c = stdr.slice(src, i, i + 1)
+    let next = stdr.slice(src, i + 1, i + 2)
+    if block_depth > 0
+      if c == "-" && next == "|"
+        block_depth += 1
+        i += 1
+      elif c == "|" && next == "-"
+        block_depth -= 1
+        i += 1
+      continue
     if in_str
       if c == "\\"
         i = i + 1
       elif c == "\""
         in_str = false
+      continue
+
+    if c == "-" && next == "|"
+      block_depth = 1
+      i += 1
       continue
 
     if c == "\""
@@ -4181,78 +4206,31 @@ def ?g_flat_counter = 0
   <- stdr.join(parts)
 ;
 
-: detect_first_external_module_from_source(entry_path = string, source_raw = string) (( string ))
-  let source = strip_line_comments(source_raw)
-  let toks = lexer.lex_with_escapes(source, should_decode_escapes(entry_path))
-  let ast = parser.parse(toks)
-  if stdr.is_null(ast) { <- "" }
-  let decls = ast["decls"] ?? []: [any]
-  let ?i = 0
-  let n = stdr.len(decls)
-  for (; i < n; i = i + 1)
-    let d = decls[i]
-    if d["tag"] == "bring"
-      let name = d["name"] ?? ""
-      if is_external_module(name) { <- name }
-  <- ""
-;
-
 : shell_quote_arg(arg = string) (( string ))
   let ?parts = []: [any]
-  stdr.push(parts, "\"")
+  stdr.push(parts, "'")
   let n = stdr.len(arg)
   let ?chunk_start = 0
   let ?i = 0
   for (; i < n; i = i + 1)
     let c = stdr.slice(arg, i, i + 1)
-    if c == "\\" || c == "\""
+    if c == "'"
       if chunk_start < i { stdr.push(parts, stdr.slice(arg, chunk_start, i)) }
-      stdr.push(parts, "\\")
-      chunk_start = i
+      stdr.push(parts, "'\"'\"'")
+      chunk_start = i + 1
   if chunk_start < n { stdr.push(parts, stdr.slice(arg, chunk_start, n)) }
-  stdr.push(parts, "\"")
+  stdr.push(parts, "'")
   <- stdr.join(parts)
-;
-
-: find_bootstrap_compiler(argv = any) (( string ))
-  let self_path = argv[0] ?? ""
-  let self_dir = dir_of(self_path)
-  if stdr.len(self_dir) > 0
-    let cand0 = stdr.str_concat(self_dir, "yis-bootstrap")
-    if file_exists(cand0) == 0 { <- cand0 }
-
-  let cand1 = "build/yis-bootstrap"
-  if file_exists(cand1) == 0 { <- cand1 }
-  let cand2 = "../Yis/build/yis-bootstrap"
-  if file_exists(cand2) == 0 { <- cand2 }
-  let cand3 = "../../Yis/build/yis-bootstrap"
-  if file_exists(cand3) == 0 { <- cand3 }
-
-  let which_res = stdr.run_command("command -v yis-bootstrap")
-  let code = which_res[0] ?? 1
-  let ?out = which_res[1] ?? ""
-  if code == 0
-    let n = stdr.len(out)
-    if n > 0 && stdr.slice(out, n - 1, n) == "\n"
-      out = stdr.slice(out, 0, n - 1)
-    <- out
-
-  <- ""
 ;
 
 : rm_file_quiet(path = string) (( -- ))
   if stdr.len(path) == 0 { <- }
-  let ?cmd = "rm -f \""
-  cmd = stdr.str_concat(cmd, path)
-  cmd = stdr.str_concat(cmd, "\"")
-  stdr.run_command(cmd)
+  stdr.remove_file(path)
 ;
 
 : rm_tree_quiet(path = string) (( -- ))
   if stdr.len(path) == 0 { <- }
-  let ?cmd = "rm -rf \""
-  cmd = stdr.str_concat(cmd, path)
-  cmd = stdr.str_concat(cmd, "\"")
+  let cmd = stdr.str_concat("rm -rf -- ", shell_quote_arg(path))
   stdr.run_command(cmd)
 ;
 
@@ -4320,7 +4298,7 @@ def ?g_flat_counter = 0
 ;
 
 -- Check if binary at out_path is newer than all dep lines in the manifest
-: check_manifest_freshness(manifest_path = string) (( string ))
+: check_manifest_freshness(manifest_path = string, entry_path = string) (( string ))
   if !stdr.file_exists(manifest_path) { <- "" }
   let raw = stdr.read_text_file(manifest_path)
   if stdr.is_null(raw) { <- "" }
@@ -4341,10 +4319,13 @@ def ?g_flat_counter = 0
 
   let line_count = stdr.len(lines)
   if line_count < 2 { <- "" }
+  -- Output names can collide for sources in different directories.
+  let manifest_entry = lines[1] ?? ""
+  if manifest_entry != entry_path { <- "" }
 
   let out_path = lines[0] ?? ""
   if !stdr.file_exists(out_path) { <- "" }
-  let out_mt = stdr.file_mtime(out_path)
+  let out_mt = stdr.file_mtime_ns(out_path)
   if out_mt < 0 { <- "" }
 
   -- Check each dependency
@@ -4352,26 +4333,10 @@ def ?g_flat_counter = 0
   for (; di < line_count; di = di + 1)
     let dep = lines[di] ?? ""
     if stdr.len(dep) == 0 { continue }
-    let dep_mt = stdr.file_mtime(dep)
+    let dep_mt = stdr.file_mtime_ns(dep)
     if dep_mt < 0 { <- "" }
     if out_mt < dep_mt { <- "" }
   <- out_path
-;
-
-: ext_module_run_c_artifact(entry_path = string, source_raw = string) (( string ))
-  let ?app_name = sanitize_filename_component(stem_name(entry_path))
-  if stdr.len(app_name) == 0 { app_name = "main" }
-
-  -- Try to resolve custom app id from source (best effort)
-  let ?src = strip_line_comments(source_raw)
-  let toks = lexer.lex_with_escapes(src, should_decode_escapes(entry_path))
-  let ast = parser.parse(toks)
-  if !stdr.is_null(ast)
-    let appid_name = find_appid_name(ast)
-    if stdr.len(appid_name) > 0
-      app_name = appid_name
-
-  <- stdr.str_concat(app_name, ".c")
 ;
 
 : should_decode_escapes(path = string) (( bool ))
@@ -4874,8 +4839,7 @@ def ?g_flat_counter = 0
   let ?exe0_in = argv[0] ?? ""
   let ?exe_path = exe0_in
   if stdr.len(exe0_in) > 0 && stdr.len(dir_of(exe0_in)) == 0
-    let ?which_cmd = stdr.str_concat("command -v \"", exe0_in)
-    which_cmd = stdr.str_concat(which_cmd, "\"")
+    let which_cmd = stdr.str_concat("command -v ", shell_quote_arg(exe0_in))
     let which_res = stdr.run_command(which_cmd)
     let which_code = which_res[0] ?? 1
     if which_code == 0
@@ -4928,8 +4892,7 @@ def ?g_flat_counter = 0
   let ?exe0_in = argv[0] ?? ""
   let ?exe_path = exe0_in
   if stdr.len(exe0_in) > 0 && stdr.len(dir_of(exe0_in)) == 0
-    let ?which_cmd = stdr.str_concat("command -v \"", exe0_in)
-    which_cmd = stdr.str_concat(which_cmd, "\"")
+    let which_cmd = stdr.str_concat("command -v ", shell_quote_arg(exe0_in))
     let which_res = stdr.run_command(which_cmd)
     let which_code = which_res[0] ?? 1
     if which_code == 0
@@ -5073,16 +5036,21 @@ def ?g_flat_counter = 0
   let cached = g_ast_cache[fpath]
   if !stdr.is_null(cached) { <- cached }
   let src = stdr.read_text_file(fpath)
-  if stdr.is_null(src) { <- null }
+  if stdr.is_null(src)
+    stdr.write(stdr.str_concat("ERR: Cannot read module: ", stdr.str_concat(fpath, "\n")))
+    stdr.exit_process(1)
   let toks = lexer.lex_with_escapes(src, should_decode_escapes(fpath))
   let ast = parser.parse(toks)
+  if stdr.is_null(ast)
+    stdr.write(stdr.str_concat("ERR: Cannot parse module: ", stdr.str_concat(fpath, "\n")))
+    stdr.exit_process(1)
   g_ast_cache[fpath] = ast
   <- ast
 ;
 
 : output_newer_than(out_path = string, dep_path = string) (( bool ))
-  let out_mt = stdr.file_mtime(out_path)
-  let dep_mt = stdr.file_mtime(dep_path)
+  let out_mt = stdr.file_mtime_ns(out_path)
+  let dep_mt = stdr.file_mtime_ns(dep_path)
   if out_mt < 0 || dep_mt < 0 { <- false }
   <- out_mt >= dep_mt
 ;
@@ -6033,14 +6001,20 @@ def ?g_flat_counter = 0
   let argv = stdr.args()
   let ?is_run_mode = false
   let ?run_arg_start = 0
+  let usage = "Usage: yis file.yi | yis run file.yi [-- arguments...]\n"
   if stdr.len(argv) < 2
-    stdr.write("Usage: yis file.yi | yis run file.yi\n")
+    stdr.write(usage)
+    stdr.exit_process(1)
   let ?entry_path = argv[1] ?? ""
+  if entry_path == "--help" || entry_path == "-h"
+    stdr.write(usage)
+    stdr.exit_process(0)
   if entry_path == "run"
     is_run_mode = true
     if stdr.len(argv) < 3
       stdr.write("ERR: Missing file path after 'run'\n")
-      stdr.write("Usage: yis file.yi | yis run file.yi\n")
+      stdr.write(usage)
+      stdr.exit_process(1)
     entry_path = argv[2] ?? ""
     run_arg_start = 3
     if stdr.len(argv) > 3
@@ -6051,6 +6025,14 @@ def ?g_flat_counter = 0
         run_arg_start = 3
   if entry_path == ""
     stdr.write("ERR: No entry path\n")
+    stdr.exit_process(1)
+  if stdr.starts_with(entry_path, "-")
+    stdr.write(stdr.str_concat("ERR: Unknown option: ", stdr.str_concat(entry_path, "\n")))
+    stdr.write(usage)
+    stdr.exit_process(1)
+  if !is_run_mode && stdr.len(argv) > 2
+    stdr.write("ERR: Unexpected arguments; use 'yis run' to pass program arguments\n")
+    stdr.exit_process(1)
   let ep_len = stdr.len(entry_path)
   let ?is_self_host = false
   if ep_len >= 11
@@ -6059,70 +6041,10 @@ def ?g_flat_counter = 0
 
   let source_raw = stdr.read_text_file(entry_path)
   if stdr.is_null(source_raw)
-    stdr.write("ERR: Cannot read file\n")
+    stdr.write(stdr.str_concat("ERR: Cannot read file: ", stdr.str_concat(entry_path, "\n")))
+    stdr.exit_process(1)
   if !stdr.starts_with(entry_path, "/")
     entry_path = stdr.str_concat(stdr.str_concat(stdr.getcwd(), "/"), entry_path)
-
-  let ?fallback_cleanup_c = ""
-  let ?detected_ext_module = ""
-  if is_run_mode
-    detected_ext_module = detect_first_external_module_from_source(entry_path, source_raw)
-
-  -- Early cache check for run mode: skip all parsing if binary is fresh
-  if is_run_mode && !is_self_host
-    let manifest = run_manifest_path(entry_path, source_raw, detected_ext_module)
-    let cached_out = check_manifest_freshness(manifest)
-    if stdr.len(cached_out) > 0
-      -- Binary is fresh according to manifest — run directly
-      let cwd = stdr.getcwd()
-      let ?run_cmd = "\""
-      run_cmd = stdr.str_concat(run_cmd, cwd)
-      run_cmd = stdr.str_concat(run_cmd, "/")
-      run_cmd = stdr.str_concat(run_cmd, cached_out)
-      run_cmd = stdr.str_concat(run_cmd, "\"")
-      let ?ri = run_arg_start
-      let rn = stdr.len(argv)
-      for (; ri < rn; ri = ri + 1)
-        let a = argv[ri] ?? ""
-        run_cmd = stdr.str_concat(run_cmd, " \"")
-        run_cmd = stdr.str_concat(run_cmd, a)
-        run_cmd = stdr.str_concat(run_cmd, "\"")
-      let run_dir = dir_of(entry_path)
-      if stdr.len(run_dir) > 0
-        let ?pref = "cd \""
-        pref = stdr.str_concat(pref, run_dir)
-        pref = stdr.str_concat(pref, "\" && ")
-        run_cmd = stdr.str_concat(pref, run_cmd)
-      run_cmd = stdr.str_concat(run_cmd, " 2>&1")
-      let run_res = stdr.run_command(run_cmd)
-      let run_out = run_res[1] ?? ""
-      if stdr.len(run_out) > 0 { stdr.write(run_out ?? "") }
-
-  -- Only compute fallback C artifact path when we actually need to compile
-  if stdr.len(detected_ext_module) > 0
-    fallback_cleanup_c = ext_module_run_c_artifact(entry_path, source_raw)
-
-  let disable_boot_fallback = env_nonempty("YIS_DISABLE_BOOTSTRAP_FALLBACK")
-  if !disable_boot_fallback && !is_self_host && !is_run_mode
-    let bootstrap_path = find_bootstrap_compiler(argv)
-    if stdr.len(bootstrap_path) > 0
-      let ?boot_cmd = shell_quote_arg(bootstrap_path)
-      let ?ai = 1
-      let an = stdr.len(argv)
-      for (; ai < an; ai = ai + 1)
-        let a = argv[ai] ?? ""
-        boot_cmd = stdr.str_concat(boot_cmd, " ")
-        boot_cmd = stdr.str_concat(boot_cmd, shell_quote_arg(a))
-      boot_cmd = stdr.str_concat(boot_cmd, " 2>&1")
-      let boot_res = stdr.run_command(boot_cmd)
-      let boot_code = boot_res[0] ?? 1
-      let boot_out = boot_res[1] ?? ""
-      if stdr.len(boot_out) > 0
-        stdr.write(boot_out ?? "")
-      if boot_code != 0
-        stdr.write("ERR: bootstrap fallback failed\n")
-      if stdr.len(fallback_cleanup_c) > 0
-        rm_file_quiet(fallback_cleanup_c)
 
   let ?source = source_raw
   if !is_self_host
@@ -6132,6 +6054,7 @@ def ?g_flat_counter = 0
   let ast = parser.parse(toks)
   if stdr.is_null(ast)
     stdr.write("ERR: Parse failed\n")
+    stdr.exit_process(1)
   let ?opt_ast = ast
   if !is_self_host && !is_run_mode
     opt_ast = optimize_program(ast)
@@ -6205,8 +6128,13 @@ def ?g_flat_counter = 0
     ext_packager_path = find_ext_module_packager(ext_mod_name, ext_module_path)
   let ?need_compile = true
   let ?stale_out = false
-  if is_run_mode
+  let no_cache = _env_value("YIS_NO_CACHE")
+  let cache_enabled = stdr.len(no_cache) == 0 || no_cache == "0"
+  if is_run_mode && cache_enabled
     if file_exists(out_path) == 0
+      let manifest = run_manifest_path(entry_path, source_raw, ext_mod_name)
+      if check_manifest_freshness(manifest, entry_path) != out_path
+        stale_out = true
       let ?seen = []: [string => any]
       if output_fresh_for_module(out_path, entry_path, seen)
         if runtime_dep_fresh(out_path, argv)
@@ -6224,30 +6152,30 @@ def ?g_flat_counter = 0
         stale_out = true
 
   if stale_out
-    let ?rm_cmd = "rm -f \""
-    rm_cmd = stdr.str_concat(rm_cmd, out_path)
-    rm_cmd = stdr.str_concat(rm_cmd, "\"")
-    stdr.run_command(rm_cmd)
+    rm_file_quiet(out_path)
     if uses_ext_module && is_macos && stdr.len(bundle_dir) > 0
       rm_tree_quiet(bundle_dir)
 
   if need_compile
     -- Read runtime for embedding in generated C (only when compiling)
     let runtime_src = find_runtime_src(argv)
+    if stdr.len(runtime_src) == 0
+      stdr.write("ERR: Cannot find runtime.inc\n")
+      stdr.exit_process(1)
     let c_src_str = stdr.str(emit_c(opt_ast, runtime_src, src_dir, entry_path))
     let ok = stdr.write_text_file(c_path, c_src_str)
     if !ok
       stdr.write("ERR: Cannot write C output\n")
+      stdr.exit_process(1)
   if need_compile
     -- Build cc command with external module flags if needed
     -- Append stderr redirection so stdr.run_command captures compiler errors
     let ?cc_opt_flags = "-Os -march=native -std=c11 -pipe"
     if is_run_mode { cc_opt_flags = "-O0 -std=c11 -pipe" }
-    let ?cc_cmd = "cc -o \""
-    cc_cmd = stdr.str_concat(cc_cmd, out_path)
-    cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
-    cc_cmd = stdr.str_concat(cc_cmd, c_path)
-    cc_cmd = stdr.str_concat(cc_cmd, "\" ")
+    let ?cc_cmd = stdr.str_concat("cc -o ", shell_quote_arg(out_path))
+    cc_cmd = stdr.str_concat(cc_cmd, " ")
+    cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(c_path))
+    cc_cmd = stdr.str_concat(cc_cmd, " ")
     cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
     cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
     if uses_ext_module
@@ -6280,11 +6208,10 @@ def ?g_flat_counter = 0
           if stdr.len(mod_ldflags) > 0
             mod_ldflags = stdr.str_concat(mod_ldflags, " ")
           mod_ldflags = stdr.str_concat(mod_ldflags, one_ldflags)
-      cc_cmd = "cc -o \""
-      cc_cmd = stdr.str_concat(cc_cmd, out_path)
-      cc_cmd = stdr.str_concat(cc_cmd, "\" \"")
-      cc_cmd = stdr.str_concat(cc_cmd, c_path)
-      cc_cmd = stdr.str_concat(cc_cmd, "\" ")
+      cc_cmd = stdr.str_concat("cc -o ", shell_quote_arg(out_path))
+      cc_cmd = stdr.str_concat(cc_cmd, " ")
+      cc_cmd = stdr.str_concat(cc_cmd, shell_quote_arg(c_path))
+      cc_cmd = stdr.str_concat(cc_cmd, " ")
       cc_cmd = stdr.str_concat(cc_cmd, cc_opt_flags)
       cc_cmd = stdr.str_concat(cc_cmd, " -lm ")
       if stdr.len(mod_cflags) > 0
@@ -6296,6 +6223,7 @@ def ?g_flat_counter = 0
     if uses_ext_module && is_macos
       if !prepare_macos_app_bundle(out_path, macos_bundle_id, app_name, macos_display_name)
         stdr.write("ERR: failed to prepare macOS app bundle\n")
+        stdr.exit_process(1)
 
     -- Embed SVG resources as base64 into a header in .app/Contents/Resources
     let ?embed_resource_dir = ""
@@ -6325,14 +6253,16 @@ def ?g_flat_counter = 0
     let out = result[1] ?? ""
     if code != 0
       _translate_cc_output(out ?? "")
+      rm_file_quiet(out_path)
+      stdr.exit_process(1)
 
     if uses_ext_module && stdr.len(ext_packager_path) > 0
       if !run_ext_module_packager(ext_packager_path, entry_path, out_path, app_name)
         stdr.write("WARN: external module packager failed\n")
 
-    -- Write run manifest for early cache on next run
+    -- Record the entry identity for cache checks on the next run.
     if is_run_mode
-      let manifest = run_manifest_path(entry_path, source_raw, detected_ext_module)
+      let manifest = run_manifest_path(entry_path, source_raw, ext_mod_name)
       let ?ext_yi_path = ""
       if stdr.len(ext_mod_name) > 0
         ext_yi_path = resolve_bring(ext_mod_name, src_dir)
@@ -6342,25 +6272,20 @@ def ?g_flat_counter = 0
   if is_run_mode
     let cwd = stdr.getcwd()
 
-    let ?run_cmd = "\""
-    run_cmd = stdr.str_concat(run_cmd, cwd)
-    run_cmd = stdr.str_concat(run_cmd, "/")
-    run_cmd = stdr.str_concat(run_cmd, out_path)
-    run_cmd = stdr.str_concat(run_cmd, "\"")
+    let executable_path = stdr.str_concat(stdr.str_concat(cwd, "/"), out_path)
+    let ?run_cmd = shell_quote_arg(executable_path)
 
     let ?ri = run_arg_start
     let rn = stdr.len(argv)
     for (; ri < rn; ri = ri + 1)
       let a = argv[ri] ?? ""
-      run_cmd = stdr.str_concat(run_cmd, " \"")
-      run_cmd = stdr.str_concat(run_cmd, a)
-      run_cmd = stdr.str_concat(run_cmd, "\"")
+      run_cmd = stdr.str_concat(run_cmd, " ")
+      run_cmd = stdr.str_concat(run_cmd, shell_quote_arg(a))
 
     let run_dir = dir_of(entry_path)
     if stdr.len(run_dir) > 0
-      let ?pref = "cd \""
-      pref = stdr.str_concat(pref, run_dir)
-      pref = stdr.str_concat(pref, "\" && ")
+      let ?pref = stdr.str_concat("cd ", shell_quote_arg(run_dir))
+      pref = stdr.str_concat(pref, " && ")
       run_cmd = stdr.str_concat(pref, run_cmd)
     run_cmd = stdr.str_concat(run_cmd, " 2>&1")
 
@@ -6371,6 +6296,5 @@ def ?g_flat_counter = 0
       stdr.write(run_out ?? "")
     if uses_ext_module
       rm_file_quiet(c_path)
-    if run_code != 0
-      stdr.write("Run FAIL!\n")
+    stdr.exit_process(run_code)
 ;

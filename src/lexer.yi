@@ -19,6 +19,10 @@ bring stdr
   <- t
 ;
 
+: lex_error(message = string, i = num, line = num, col = num) (( any ))
+  <- [tok("error", line, col, message, 0, ""), i, line, col]
+;
+
 : is_space(c = string) (( bool ))
   if stdr.is_null(c) || stdr.len(c) == 0 { <- false }
   let code = stdr.char_code(c)
@@ -141,7 +145,13 @@ bring stdr
       let c2 = stdr.slice(source, cur_i + 1, cur_i + 2)
       if c2 == "|"
         let r = skip_block_comment(source, cur_i + 2, cur_line, cur_col + 2)
-        if stdr.is_null(r) { <- [cur_i, cur_line, cur_col] }
+        if stdr.is_null(r)
+          let ?err = []: [any]
+          err[0] = cur_i
+          err[1] = cur_line
+          err[2] = cur_col
+          err[3] = "unterminated block comment"
+          <- err
         cur_i = r[0] ?? 0
         cur_line = r[1] ?? 1
         cur_col = r[2] ?? 1
@@ -467,8 +477,7 @@ bring stdr
           if ch == "\\" && j + 1 < n { j = j + 2; continue }
           if stdr.char_code(ch) == 10 { break }
           j = j + 1
-        let str_val = stdr.slice(source, i + 1, j)
-        <- [tok("str", line, col, "", 0, str_val), j, line, col]
+        <- lex_error("unterminated string", j, line, col)
 
       let ?str_parts = []: [any]
       let ?chunk_start = j
@@ -486,8 +495,7 @@ bring stdr
           continue
         if stdr.char_code(ch) == 10 { break }
         j = j + 1
-      if chunk_start < j { stdr.push(str_parts, stdr.slice(source, chunk_start, j)) }
-      <- [tok("str", line, col, "", 0, stdr.join(str_parts)), j, line, col]
+      <- lex_error("unterminated string", j, line, col)
     -- Interpolated string: split into parts
     if !decode_escapes
       let ?parts = []: [any]
@@ -520,11 +528,12 @@ bring stdr
           if vend + 1 < n && stdr.slice(source, vend, vend + 1) == "$" && stdr.slice(source, vend + 1, vend + 2) == "$"
             j = vend + 2
           else
-            j = vend
+            <- lex_error("unterminated interpolation placeholder", vend, line, col)
           seg_start = j
           continue
         if stdr.char_code(ch) == 10 { break }
         j = j + 1
+      if j >= n || stdr.slice(source, j, j + 1) != "\"" { <- lex_error("unterminated string", j, line, col) }
       if j > seg_start
         let ?tp = []: [string => any]
         let tkk = "kind"
@@ -578,11 +587,12 @@ bring stdr
         if vend + 1 < n && stdr.slice(source, vend, vend + 1) == "$" && stdr.slice(source, vend + 1, vend + 2) == "$"
           j = vend + 2
         else
-          j = vend
+          <- lex_error("unterminated interpolation placeholder", vend, line, col)
         seg_chunk_start = j
         continue
       if stdr.char_code(ch) == 10 { break }
       j = j + 1
+    if j >= n || stdr.slice(source, j, j + 1) != "\"" { <- lex_error("unterminated string", j, line, col) }
     if seg_chunk_start < j { stdr.push(seg_parts, stdr.slice(source, seg_chunk_start, j)) }
     let seg_final = stdr.join(seg_parts)
     if stdr.len(seg_final) > 0
@@ -597,7 +607,7 @@ bring stdr
     t_interp[partsk] = parts
     let end_j = if j < n { j + 1 } else { j }
     <- [t_interp, end_j, line, start_col + (end_j - i)]
-  <- [tok("ident", line, col, c, 0, ""), i + 1, line, col + 1]
+  <- lex_error(stdr.str_concat("unexpected character: ", c), i + 1, line, col)
 ;
 
 : is_stmt_end(kind = string) (( bool ))
@@ -679,6 +689,10 @@ bring stdr
     let i2 = r[0] ?? 0
     let line2 = r[1] ?? 1
     let col2 = r[2] ?? 1
+    let ws_error = r[3] ?? ""
+    if stdr.len(ws_error) > 0
+      stdr.push(cur_acc, tok("error", line2, col2, ws_error, 0, ""))
+      <- cur_acc
     let lr = lex_one(source, i2, line2, col2, decode_escapes)
     let t = lr[0]
     let ?next_i = 0
@@ -693,6 +707,7 @@ bring stdr
     if tk == "rpar" && last_kind == "rpar" && ret_depth > 0
       ret_depth = ret_depth - 1
     stdr.push(cur_acc, t)
+    if tk == "error" { <- cur_acc }
     if next_i >= n { <- cur_acc }
     if tk == "eof" { <- cur_acc }
     second_last_kind = last_kind

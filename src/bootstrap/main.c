@@ -26,7 +26,7 @@
 #include "str.h"
 #include "typecheck.h"
 
-#define YIS_CACHE_VERSION "yis-cache-v1"
+#define YIS_CACHE_VERSION "yis-cache-v2"
 
 static uint64_t hash_update(uint64_t h, const void *data, size_t len) {
     const unsigned char *p = (const unsigned char *)data;
@@ -266,6 +266,14 @@ static const char *cc_path(void) {
 static const char *cc_flags(void) {
     const char *flags = getenv("YIS_CC_FLAGS");
     return flags && flags[0] ? flags : "-O3 -std=c11 -pipe";
+}
+
+static const char *cc_runtime_ldflags(void) {
+#if defined(_WIN32)
+    return "";
+#else
+    return "-lm";
+#endif
 }
 
 // Get an env var for an external module: YIS_{NAME}_{suffix}
@@ -1026,8 +1034,9 @@ int main(int argc, char **argv) {
         }
 #endif
         char cmd[4096];
-        int n = snprintf(cmd, sizeof(cmd), "%s %s %s %s -o %s %s",
-                         cc_path(), cc_flags(), extra_cflags, c_path, bin_path, extra_ldflags);
+        int n = snprintf(cmd, sizeof(cmd), "%s %s %s %s -o %s %s %s",
+                         cc_path(), cc_flags(), extra_cflags, c_path, bin_path, extra_ldflags,
+                         cc_runtime_ldflags());
         if (n < 0 || (size_t)n >= sizeof(cmd)) {
             fprintf(stderr, "error: compile command too long\n");
             free(ext_bindings_alloc);

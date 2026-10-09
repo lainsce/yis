@@ -291,7 +291,13 @@ Common `stdr` functions used by current code:
 - `len`, `str`, `num`, `is_null`
 - `read_text_file`, `write_text_file`
 - `run_command`
+- `exit_process(code)`: terminate with a process exit code
+- `file_mtime(path)`: Unix timestamp in seconds, or `-1` if unavailable
+- `file_mtime_ns(path)`: Unix timestamp in nanoseconds, or `-1` if unavailable
 - `open_file_dialog`, `save_file_dialog`, `open_folder_dialog`
+
+`run_command` returns the command's exit code and captured stdout. On POSIX,
+a command terminated by a signal returns `128 + signal number`.
 
 Common `math` functions:
 

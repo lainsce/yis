@@ -5,6 +5,15 @@ project('yis', 'c',
 
 add_project_arguments('-march=native', language : 'c')
 
+if host_machine.system() != 'windows'
+  # The bootstrap uses POSIX APIs that strict C11 hides by default.
+  add_project_arguments('-D_POSIX_C_SOURCE=200809L', '-D_XOPEN_SOURCE=700', language : 'c')
+endif
+
+if host_machine.system() == 'darwin'
+  add_project_arguments('-D_DARWIN_C_SOURCE', language : 'c')
+endif
+
 yis_c_sources = files(
   'src/bootstrap/main.c',
   'src/bootstrap/lexer.c',
@@ -45,9 +54,20 @@ yis_target = custom_target(
   ],
   build_by_default : true,
   depends : yis_bootstrap,
+  depend_files : files('src/runtime.inc', 'src/stdlib/stdr.yi'),
   install : true,
   install_dir : get_option('bindir')
 )
+
+test_python = find_program('python3', required : false)
+if test_python.found()
+  test(
+    'compiler-regressions',
+    test_python,
+    args : [files('tests/test_compiler.py'), yis_target, meson.project_source_root()],
+    timeout : 120
+  )
+endif
 
 install_data(
   'src/runtime.inc',
